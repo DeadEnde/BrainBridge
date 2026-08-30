@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/banner.png" alt="BrainBridge" width="100%"></p>
+
 # BrainBridge — permanent memory for AI agents (via Google NotebookLM)
 
 **Give any AI agent a brain that remembers.** BrainBridge is an MCP server that
