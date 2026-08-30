@@ -92,34 +92,49 @@ def login_via_browser_cookies(browser: str = "chrome") -> dict:
 def ensure_auth(popup: bool = True, browser: str | None = None) -> dict:
     """Make sure we have a valid session. Starts the popup login if not.
 
-    Returns {'ok': bool, 'action': str, 'detail': str}.
+    Fallback chain (automatic):
+      1. valid session?            -> 'already_valid'
+      2. popup mode: browser popup (system Chrome if reachable, else bundled Chromium)
+      3. browser-cookies silent    -> 'browser_cookies'
+      4. manual instructions       -> 'failed' (user runs notebooklm login)
 
-    Action values:
-      'already_valid' — session works, nothing to do.
-      'login'         — popup flow launched (user should see a browser tab).
-      'browser_cookies' — silent cookies read from installed browser worked.
-      'failed'        — could not establish session (see detail for next step).
+    Returns {'ok': bool, 'action': str, 'detail': str}.
     """
     valid, detail = auth_check(test=True)
     if valid:
         return {"ok": True, "action": "already_valid", "detail": detail}
 
     mode = os.environ.get(LOGIN_MODE_ENV, "popup").lower()
+    browsers: list[str | None] = [browser]
+    env_browser = os.environ.get("BRAINBRIDGE_LOGIN_BROWSER")
+    if env_browser and env_browser not in browsers:
+        browsers.append(env_browser)
+    if not any(browsers):
+        browsers = ["chrome", None]  # system Chrome first (best SSO UX), then bundled
+
+    if mode == "popup":
+        for b in browsers:
+            res = login_via_popup(browser=b, wait_minutes=6)
+            if res["ok"]:
+                return {"ok": True, "action": "login", "detail": res.get("detail", "")}
+            # if it failed because browser/playwright unavailable, continue the chain
+        # popup didn't work -> try silent browser-cookies
+        silent = login_via_browser_cookies(os.environ.get("BRAINBRIDGE_LOGIN_BROWSER", "chrome"))
+        if silent["ok"]:
+            return {"ok": True, "action": "browser_cookies", "detail": silent.get("detail", "")}
+        return {"ok": False, "action": "failed",
+                "detail": ("Popup login could not complete in this environment "
+                           "(no display / no browser). " + (silent.get("error") or silent.get("detail") or ""))[:600]}
+
     if mode == "browser":
         res = login_via_browser_cookies(os.environ.get("BRAINBRIDGE_LOGIN_BROWSER", "chrome"))
         return {"ok": res["ok"], "action": "browser_cookies" if res["ok"] else "failed",
                 "detail": res.get("detail", "")}
 
-    if popup and mode != "manual":
-        res = login_via_popup(browser=browser)
-        if res["ok"]:
-            return {"ok": True, "action": "login", "detail": res.get("detail", "")}
-        return {"ok": False, "action": "failed",
-                "detail": res.get("error", res.get("detail", ""))}
-
+    # manual mode
     return {"ok": False, "action": "failed",
             "detail": ("No valid NotebookLM session. Run `notebooklm login` "
-                       "(or set BRAINBRIDGE_LOGIN_MODE=browser) and try again. "
+                       "(or set BRAINBRIDGE_LOGIN_MODE=popup|browser) and try again. "
                        "Original check: " + detail)}
 
 

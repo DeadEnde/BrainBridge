@@ -8,8 +8,10 @@ notebooks ("brains")** — ask with citations, save memories as dated sources,
 read everything back. Zero context loss.
 
 > Auth is a **one-time Google popup** (`brain_login`) — no cookies, no copy-paste.
-> A keepalive loop keeps the session alive for weeks. Your memory stays in your
-> own Google account (cloud), and this server runs **locally / self-hosted**.
+> Lazy auth: ANY memory tool auto-opens the popup when the session is missing.
+> Fallback chain: popup (system Chrome → bundled Chromium) → silent browser cookies →
+> clear instructions. A keepalive loop keeps the session alive for weeks.
+> Your memory stays in your own Google account (cloud); this server runs **locally / self-hosted**.
 
 ---
 
