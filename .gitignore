@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.log
+.DS_Store
+# Secrets — never commit the session/cookies
+storage_state.json*
+cookies*.json
+.notebooklm/
+.env
+.env.*

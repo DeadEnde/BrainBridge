@@ -1,0 +1,3 @@
+notebooklm-py[headless,browser]>=0.6
+httpx>=0.27
+fastmcp>=2.0
