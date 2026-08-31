@@ -10,3 +10,4 @@ cookies*.json
 .notebooklm/
 .env
 .env.*
+bin/
