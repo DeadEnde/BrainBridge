@@ -7,7 +7,7 @@
 ## 1) L-gateway (lli khdam daba)
 
 ```
-Base URL : https://issues-thus-hwy-justice.trycloudflare.com
+Base URL : https://sensors-backing-absent-analyzed.trycloudflare.com
 Key      : ~/.notebooklm/gateway_key.txt  (= `{key[:4]}…{key[-4:]}`)
 Auth     : Authorization: Bearer <key>
 ```
@@ -16,15 +16,15 @@ Auth     : Authorization: Bearer <key>
 
 Jrrbo:
 ```bash
-curl -H "Authorization: Bearer $KEY" https://issues-thus-hwy-justice.trycloudflare.com/status        # session health
-curl -H "Authorization: Bearer $KEY" https://issues-thus-hwy-justice.trycloudflare.com/brains        # notebooks dyalk
+curl -H "Authorization: Bearer $KEY" https://sensors-backing-absent-analyzed.trycloudflare.com/status        # session health
+curl -H "Authorization: Bearer $KEY" https://sensors-backing-absent-analyzed.trycloudflare.com/brains        # notebooks dyalk
 ```
 
 ## 2) AI prompt — nss9h 3tih l ay model
 
 ```
 You have a permanent brain (Google NotebookLM) bridged by BrainBridge.
-Base: https://issues-thus-hwy-justice.trycloudflare.com   Auth: Authorization: Bearer <KEY>
+Base: https://sensors-backing-absent-analyzed.trycloudflare.com   Auth: Authorization: Bearer <KEY>
 
 - POST {base}/ask {question, brain:"personal"}  -> answer with citations
 - POST {base}/memory/save {title, content}      -> persist as dated source (one per session, never overwrite)

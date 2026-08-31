@@ -13,19 +13,27 @@ Every call lands in Google NotebookLM ("the brain"). No MCP client needed.
 It also hosts the AUTH endpoints, so "add notebooklm auth" lives here:
   POST /auth/import    <- Cookie-Editor JSON export  (token unlock)
   POST /auth/refresh   <- rotate token (keepalive)
+  GET  /auth/export    <- base64 of the session state (paste into Vercel env)
 
-Run:  python3 -m uvicorn brainbridge.gateway:app --host 0.0.0.0 --port 8999
-Key:  auto-generated, stored in ~/.notebooklm/gateway_key.txt (chmod 600).
+Deployment:
+  Local:    python3 -m uvicorn brainbridge.gateway:app --host 0.0.0.0 --port 8999
+  Vercel:   api/index.py mounts this app under /api/* ; session is restored
+            from BRAINBRIDGE_STATE_B64 and the key from BRAINBRIDGE_GATEWAY_KEY.
+
+Key:  env BRAINBRIDGE_GATEWAY_KEY (Vercel) → else ~/.notebooklm/gateway_key.txt.
 Send it as:  Authorization: Bearer <key>
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import secrets
 import subprocess
+import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -49,35 +57,77 @@ BRAIN_REGISTRY: dict[str, dict[str, str]] = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# Key + session storage (local file OR Vercel env vars)
+# ---------------------------------------------------------------------------
 KEY_FILE = Path.home() / ".notebooklm" / "gateway_key.txt"
 
 
 def _get_api_key() -> str:
-    if KEY_FILE.exists():
-        return KEY_FILE.read_text().strip()
-    KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    key = secrets.token_urlsafe(24)
-    KEY_FILE.write_text(key)
+    env = os.environ.get("BRAINBRIDGE_GATEWAY_KEY", "").strip()
+    if env:
+        return env
     try:
-        os.chmod(KEY_FILE, 0o600)
+        if KEY_FILE.exists():
+            return KEY_FILE.read_text().strip()
+        KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        key = secrets.token_urlsafe(24)
+        KEY_FILE.write_text(key)
+        try:
+            os.chmod(KEY_FILE, 0o600)
+        except OSError:
+            pass
+        return key
     except OSError:
-        pass
-    return key
+        # Read-only home (Vercel) -> stable key only via env var.
+        raise RuntimeError(
+            "No BRAINBRIDGE_GATEWAY_KEY env var and cannot write the key file. "
+            "Set BRAINBRIDGE_GATEWAY_KEY (Vercel env or local export)."
+        )
 
 
 API_KEY = _get_api_key()
 
+# Session state: local default, or overridden by BRAINBRIDGE_STORAGE (Vercel /tmp)
+DEFAULT_STORAGE = str(Path.home() / ".notebooklm" / "profiles" / "default" / "storage_state.json")
+STORAGE = Path(os.environ.get("BRAINBRIDGE_STORAGE", DEFAULT_STORAGE)).expanduser()
+
+
+def bootstrap_state() -> None:
+    """On boot (Vercel): restore the session from BRAINBRIDGE_STATE_B64 if needed."""
+    state_b64 = os.environ.get("BRAINBRIDGE_STATE_B64", "").strip()
+    if not state_b64:
+        return
+    STORAGE.parent.mkdir(parents=True, exist_ok=True)
+    if not STORAGE.exists() or STORAGE.stat().st_size < 50:
+        try:
+            STORAGE.write_bytes(base64.b64decode(state_b64))
+        except Exception as e:  # noqa: BLE001
+            print(f"[bridge] could not restore session state: {e}", file=sys.stderr)
+
+
+def _state_b64() -> str:
+    if STORAGE.exists():
+        return base64.b64encode(STORAGE.read_bytes()).decode()
+    return ""
+
 
 def _check_key(authorization: str | None) -> None:
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Missing key. Send 'Authorization: Bearer <key>' (file: ~/.notebooklm/gateway_key.txt)")
+        raise HTTPException(
+            401,
+            "Missing key. Send 'Authorization: Bearer <key>' "
+            "(env BRAINBRIDGE_GATEWAY_KEY, or ~/.notebooklm/gateway_key.txt locally).",
+        )
     if authorization.split(" ", 1)[1].strip() != API_KEY:
         raise HTTPException(403, "Invalid key")
 
 
 def _run(args: list[str], timeout: int = 180) -> str:
+    """Run the notebooklm CLI (works locally AND on Vercel: python -m notebooklm)."""
     proc = subprocess.run(
-        ["notebooklm", *args], capture_output=True, text=True, timeout=timeout
+        [sys.executable, "-m", "notebooklm", "--storage", str(STORAGE), *args],
+        capture_output=True, text=True, timeout=timeout,
     )
     return ((proc.stdout or "") + (proc.stderr or "")).strip()
 
@@ -149,7 +199,7 @@ def home():
     return {
         "name": "BrainBridge Gateway",
         "status": "ok",
-        "auth": "Authorization: Bearer <key>  (file ~/.notebooklm/gateway_key.txt)",
+        "auth": "Authorization: Bearer <key> (env BRAINBRIDGE_GATEWAY_KEY)",
         "endpoints": {
             "GET  /health": "public",
             "GET  /status": "session health",
@@ -161,6 +211,7 @@ def home():
             "GET  /memory/context": "?brain=",
             "POST /auth/import": "cookie JSON (unlock session)",
             "POST /auth/refresh": "rotate token (keepalive)",
+            "GET  /auth/export": "base64 session state (paste into Vercel env)",
         },
         "ai_prompt": (
             "You have access to the user's permanent brain (Google NotebookLM) via "
@@ -216,7 +267,7 @@ def memory_save(req: SaveIn, authorization: str | None = Header(default=None)):
     _check_key(authorization)
     _require_session()
     entry = _resolve_brain(req.brain)
-    today = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     filename = f"{req.title.strip().lower().replace(' ', '-')}-{today}.md"
     md = f"# {req.title}\n\n> Memory entry · {today} · via BrainBridge\n\n{req.content}\n"
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
@@ -292,16 +343,17 @@ def auth_import(req: ImportIn, authorization: str | None = Header(default=None))
         data = json.loads(Path(req.file).read_text())
     else:
         data = req.cookies
-    # normalize to Cookie-Editor export shape: [{"name","value","domain",...}]
     cookies = data if isinstance(data, list) else data.get("cookies", data)
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
         json.dump(cookies, f)
         tmp = f.name
     out = _run(["auth", "import-cookies", tmp], timeout=180)
     Path(tmp).unlink(missing_ok=True)
-    if not _session_ok()[0]:
+    valid, detail = _session_ok()
+    if not valid:
         raise HTTPException(401, "Import did not produce a valid session. " + out[:400])
-    return {"ok": True, "session": "valid", "detail": out[:300]}
+    return {"ok": True, "session": "valid", "detail": (out + "\n" + detail)[:400],
+            "state_b64": _state_b64()}
 
 
 @app.post("/auth/refresh")
@@ -310,9 +362,40 @@ def auth_refresh(authorization: str | None = Header(default=None)):
     _check_key(authorization)
     out = _run(["auth", "refresh"], timeout=120)
     valid, detail = _session_ok()
-    return {"ok": valid, "refresh": out[:300], "detail": detail[:300]}
+    return {"ok": valid, "refresh": out[:300], "detail": detail[:300],
+            "state_b64": _state_b64() if valid else ""}
+
+
+@app.get("/auth/export")
+def auth_export(authorization: str | None = Header(default=None)):
+    """Base64 of the current session state — save it into BRAINBRIDGE_STATE_B64."""
+    _check_key(authorization)
+    state = _state_b64()
+    return {"ok": bool(state), "state_b64": state,
+            "tip": "Paste this into the Vercel env var BRAINBRIDGE_STATE_B64 so the "
+                   "session survives cold starts, or set it locally."}
+
+
+@app.api_route("/cron/keepalive", methods=["GET", "POST"])
+def cron_keepalive(request: Request, authorization: str | None = Header(default=None)):
+    """Keepalive endpoint for Vercel Cron.
+
+    Protected two ways: Vercel Cron requests carry 'user-agent: vercel-cron/1.0'
+    (checked here), or an explicit Bearer key. Rotates __Secure-1PSIDTS."
+    """
+    ua = (request.headers.get("user-agent") or "").lower()
+    cron_ok = ua.startswith("vercel-cron")
+    key_ok = False
+    if authorization and authorization.startswith("Bearer "):
+        key_ok = authorization.split(" ", 1)[1].strip() == API_KEY
+    if not (cron_ok or key_ok):
+        raise HTTPException(403, "cron only")
+    out = _run(["auth", "refresh"], timeout=120)
+    valid, detail = _session_ok()
+    return {"ok": valid, "refresh": out[:200], "detail": detail[:200]}
 
 
 if __name__ == "__main__":
     import uvicorn
+    bootstrap_state()
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("BRAINBRIDGE_GATEWAY_PORT", "8999")))
