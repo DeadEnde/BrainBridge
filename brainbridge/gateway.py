@@ -79,11 +79,9 @@ def _get_api_key() -> str:
             pass
         return key
     except OSError:
-        # Read-only home (Vercel) -> stable key only via env var.
-        raise RuntimeError(
-            "No BRAINBRIDGE_GATEWAY_KEY env var and cannot write the key file. "
-            "Set BRAINBRIDGE_GATEWAY_KEY (Vercel env or local export)."
-        )
+        # Read-only home (Vercel) -> only the env var works; don't crash the
+        # whole deployment at import time — endpoints will 503 with a hint.
+        return ""
 
 
 API_KEY = _get_api_key()
@@ -113,6 +111,12 @@ def _state_b64() -> str:
 
 
 def _check_key(authorization: str | None) -> None:
+    if not API_KEY:
+        raise HTTPException(
+            503,
+            "BRAINBRIDGE_GATEWAY_KEY is not set on the server. Set it in the "
+            "Vercel env (same value as the key you send clients).",
+        )
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
             401,

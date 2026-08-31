@@ -4,8 +4,8 @@ Mounts the gateway app under /api/* (same pattern as the CVForge API).
 On boot it restores the NotebookLM session from BRAINBRIDGE_STATE_B64 (env),
 so the brain keeps working across cold starts.
 
-Vercel env vars (Settings → Environment Variables):
-  BRAINBRIDGE_GATEWAY_KEY   -> the bearer key clients send (Authorization: Bearer …)
+Vercel env vars (Settings -> Environment Variables):
+  BRAINBRIDGE_GATEWAY_KEY   -> the bearer key clients send (Authorization: Bearer ...)
   BRAINBRIDGE_STATE_B64     -> base64 of storage_state.json (run GET /api/auth/export
                                after a successful /api/auth/import to get it)
 Optional:
@@ -18,10 +18,16 @@ Local test of the same entrypoint:
 from __future__ import annotations
 
 import os
-import tempfile
+import sys
 from pathlib import Path
 
-from fastapi import FastAPI
+# Vercel executes the function from inside /var/task/api and does NOT put the
+# repo root on sys.path — make `import brainbridge` resolvable before anything.
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from fastapi import FastAPI  # noqa: E402
 
 # On Vercel /tmp is writable; keep the session there (ephemeral by design —
 # the durable copy lives in BRAINBRIDGE_STATE_B64).
