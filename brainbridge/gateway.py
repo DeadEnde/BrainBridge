@@ -98,19 +98,24 @@ def bootstrap_state() -> None:
     The value is base64 of storage_state.json. A gzipped payload (gzip magic
     bytes 1f 8b) is also accepted, so the value fits Vercel's ~4KB env-var
     budget for serverless functions.
+
+    For serverless correctness we always re-restore from the env on boot:
+    /tmp is ephemeral and may hold stale bytes from a previous invocation.
     """
     state_b64 = os.environ.get("BRAINBRIDGE_STATE_B64", "").strip()
     if not state_b64:
         return
     STORAGE.parent.mkdir(parents=True, exist_ok=True)
-    if not STORAGE.exists() or STORAGE.stat().st_size < 50:
-        try:
-            data = base64.b64decode(state_b64)
-            if data[:2] == b"\x1f\x8b":
-                data = gzip.decompress(data)
+    try:
+        data = base64.b64decode(state_b64)
+        if data[:2] == b"\x1f\x8b":
+            data = gzip.decompress(data)
+        if len(data) > 50:
             STORAGE.write_bytes(data)
-        except Exception as e:  # noqa: BLE001
-            print(f"[bridge] could not restore session state: {e}", file=sys.stderr)
+        else:
+            print("[bridge] BRAINBRIDGE_STATE_B64 decoded to <50 bytes; ignoring", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001
+        print(f"[bridge] could not restore session state: {e}", file=sys.stderr)
 
 
 def _state_b64() -> str:
