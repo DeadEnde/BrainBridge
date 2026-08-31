@@ -27,6 +27,7 @@ Send it as:  Authorization: Bearer <key>
 from __future__ import annotations
 
 import base64
+import gzip
 import json
 import os
 import secrets
@@ -92,14 +93,22 @@ STORAGE = Path(os.environ.get("BRAINBRIDGE_STORAGE", DEFAULT_STORAGE)).expanduse
 
 
 def bootstrap_state() -> None:
-    """On boot (Vercel): restore the session from BRAINBRIDGE_STATE_B64 if needed."""
+    """On boot (Vercel): restore the session from BRAINBRIDGE_STATE_B64 if needed.
+
+    The value is base64 of storage_state.json. A gzipped payload (gzip magic
+    bytes 1f 8b) is also accepted, so the value fits Vercel's ~4KB env-var
+    budget for serverless functions.
+    """
     state_b64 = os.environ.get("BRAINBRIDGE_STATE_B64", "").strip()
     if not state_b64:
         return
     STORAGE.parent.mkdir(parents=True, exist_ok=True)
     if not STORAGE.exists() or STORAGE.stat().st_size < 50:
         try:
-            STORAGE.write_bytes(base64.b64decode(state_b64))
+            data = base64.b64decode(state_b64)
+            if data[:2] == b"\x1f\x8b":
+                data = gzip.decompress(data)
+            STORAGE.write_bytes(data)
         except Exception as e:  # noqa: BLE001
             print(f"[bridge] could not restore session state: {e}", file=sys.stderr)
 
