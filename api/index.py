@@ -28,6 +28,8 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from fastapi import FastAPI  # noqa: E402
+from fastapi.responses import HTMLResponse
+from pathlib import Path as _P
 
 # On Vercel /tmp is writable; keep the session there (ephemeral by design —
 # the durable copy lives in BRAINBRIDGE_STATE_B64).
@@ -40,4 +42,15 @@ from brainbridge.gateway import bootstrap_state  # noqa: E402
 bootstrap_state()
 
 app = FastAPI(title="BrainBridge (Vercel)", version="1.0")
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def root_page():
+    """Landing/status page — so the root URL is not a bare 404."""
+    p = _P(__file__).parent / "root.html"
+    if p.exists():
+        return HTMLResponse(p.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>BrainBridge Gateway</h1><p>API at <code>/api/*</code></p>")
+
+
 app.mount("/api", gateway_app)

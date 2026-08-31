@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BrainBridge Gateway — Live</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh;display:grid;place-items:center;
+       background:radial-gradient(1200px 700px at 20% 0%,#1e1b4b,transparent 55%),radial-gradient(1000px 600px at 90% 100%,#4c1d95,transparent 50%),#0a0c14;color:#eef0f8}
+  .card{max-width:760px;width:92%;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);
+        border-radius:22px;padding:44px;backdrop-filter:blur(14px)}
+  h1{font-size:2rem;margin-bottom:6px;background:linear-gradient(90deg,#a78bfa,#f472b6,#38bdf8);
+     -webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:#9aa7d8;margin-bottom:26px;font-size:.95rem}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .box{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:16px}
+  .box b{display:block;margin-bottom:5px;font-size:.82rem;letter-spacing:.04em;color:#c4b5fd}
+  .box .ep{color:#eef0f8;font-family:ui-monospace,Menlo,monospace;font-size:.82rem;word-break:break-all}
+  .box .hint{color:#8b93a7;font-size:.82rem;margin-top:8px}
+  .pill{display:inline-block;padding:4px 10px;border-radius:999px;font-size:.72rem;font-weight:700;margin:2px 4px 2px 0}
+  .pill.ok{background:rgba(52,211,153,.18);color:#34d399;border:1px solid rgba(52,211,153,.4)}
+  .pill.warn{background:rgba(251,191,36,.15);color:#fbbf24;border:1px solid rgba(251,191,36,.35)}
+  .pill.bad{background:rgba(248,113,113,.15);color:#f87171;border:1px solid rgba(248,113,113,.35)}
+  .footer{margin-top:26px;color:#8b93a7;font-size:.78rem;line-height:1.7}
+  .footer code{background:rgba(255,255,255,.07);padding:2px 7px;border-radius:7px;font-size:.75rem}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>🧠 BrainBridge Gateway</h1>
+    <p class="sub">NotebookLM brain — any AI can ask &amp; save. API is under <code>/api/*</code>.</p>
+    <div class="grid">
+      <div class="box"><b>BASE</b><div class="ep">/api/</div>
+        <div class="hint">POST /ask · /memory/save · GET /status · /brains</div></div>
+      <div class="box"><b>AUTH</b><div class="ep">Authorization: Bearer &lt;key&gt;</div>
+        <div class="hint">Key from env <code>BRAINBRIDGE_GATEWAY_KEY</code></div></div>
+      <div class="box"><b>HEALTH</b><div class="ep">/api/health</div>
+        <div class="pill ok">✅ online</div><div class="hint">public — no key needed</div></div>
+      <div class="box"><b>SESSION</b><div class="ep">/api/status</div>
+        <div class="pill warn">⏳ check</div><div class="hint">call with key to see NotebookLM auth</div></div>
+    </div>
+    <div class="footer">
+      <b>Endpoints:</b>
+      <code>POST /api/ask</code> <code>POST /api/memory/save</code> <code>GET /api/memory/context</code>
+      <code>GET /api/memory/list</code> <code>GET /api/memory/read</code> <code>POST /api/auth/import</code>
+      <code>POST /api/auth/refresh</code> <code>GET /api/auth/export</code> <code>POST /api/cron/keepalive</code>
+      <br><br>
+      Full guide → <code>BRAIN-LINK.md</code> · deploy → <code>DEPLOY-VERCEL.md</code>
+    </div>
+  </div>
+</body>
+</html>
