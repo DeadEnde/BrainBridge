@@ -48,10 +48,23 @@ class FileStore:
     name = "file"
 
     def __init__(self, base_dir: Path = BASE_DIR):
-        self.dir = base_dir / "users"
-        self.tdir = base_dir / "tickets"
-        self.dir.mkdir(parents=True, exist_ok=True)
-        self.tdir.mkdir(parents=True, exist_ok=True)
+        # On serverless (Vercel) only /tmp is writable; the repo root is
+        # read-only. If the configured dir can't be created, fall back to /tmp
+        # (ephemeral but at least the API doesn't 500; KV/Blob is the durable fix).
+        for candidate in (base_dir, Path(os.environ.get("TMPDIR", "/tmp")) / "bbdata"):
+            try:
+                self.dir = candidate / "users"
+                self.tdir = candidate / "tickets"
+                self.dir.mkdir(parents=True, exist_ok=True)
+                self.tdir.mkdir(parents=True, exist_ok=True)
+                self._writable = True
+                break
+            except OSError:
+                continue
+        else:
+            self.dir = Path("/tmp") / "bbdata" / "users"
+            self.tdir = Path("/tmp") / "bbdata" / "tickets"
+            self._writable = False
 
     def get_user(self, key: str) -> dict | None:
         p = self.dir / f"{key}.json"
