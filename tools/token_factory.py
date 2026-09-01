@@ -147,8 +147,14 @@ def update_ticket_url(tid: str) -> None:
 
 
 # --------------------------------------------------------------------------- 2) POPUP WORKER
+def ticket_dir() -> Path:
+    d = Path.home() / ".notebooklm" / "tickets"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def handle_popup(tid: str) -> None:
-    storage = Path("/tmp") / f"bb_ticket_{tid}.json"
+    storage = ticket_dir() / f"bb_ticket_{tid}.json"
     try:
         storage.unlink(missing_ok=True)
     except OSError:
@@ -171,6 +177,10 @@ def handle_popup(tid: str) -> None:
     ok = False
     while time.time() < deadline:
         time.sleep(12)
+        if proc.poll() is not None and not (storage.exists() and storage.stat().st_size > 200):
+            log(f"popup: login process exited early (rc={proc.returncode}) — aborting ticket {tid}")
+            post(f"/auth/tickets/{tid}/fail")
+            return
         try:
             if storage.exists() and storage.stat().st_size > 200:
                 r = subprocess.run([sys.executable, "-m", "notebooklm", "--storage",

@@ -608,13 +608,16 @@ def ticket_next(authorization: str | None = Header(default=None)):
     if ctx.get("user") is not None:
         raise HTTPException(403, "Owner only")
     store = get_store()
-    pending = [t for t in store.list_tickets() if t.get("status") == "pending"]
+    now = int(datetime.now(timezone.utc).timestamp())
+    pending = [t for t in store.list_tickets()
+               if t.get("status") == "pending"
+               or (t.get("status") == "open" and now - int(t.get("claimed", 0)) > 1800)]
     pending.sort(key=lambda t: t.get("created", 0))
     if not pending:
         return {"ticket_id": None}
     t = pending[0]
-    t["status"] = "open"  # claimed by the worker
-    t["claimed"] = int(datetime.now(timezone.utc).timestamp())
+    t["status"] = "open"  # claimed by the worker (workers that died get reclaimed)
+    t["claimed"] = now
     store.put_ticket(t)
     return {"ticket_id": t["ticket_id"], "status": "open", "label": t.get("label", "")}
 
