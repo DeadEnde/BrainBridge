@@ -1,27 +1,20 @@
 """BrainBridge HTTP gateway — give ANY AI model access to your NotebookLM brain.
 
-Exposes the brain over plain HTTP(S) with a bearer key, so any AI agent
-(chat assistants, n8n/Zapier, scripts, sandboxes, MCP-less clients) can:
+Single-owner mode (classic):
+  Ask / save / read via a bearer key, one Google session (the owner's).
+  POST /auth/import, /auth/refresh, GET /auth/export keep that session alive.
 
-  ask questions            -> brain answers with citations
-  save memories            -> dated Markdown source in the notebook
-  list / read / context    -> browse the memory archive
-  status / refresh         -> session health + token rotation
+Multi-user mode (BrainBridge Multi):
+  POST /auth/register    <- paste a Cookie-Editor export (or storage state)
+  POST /auth/tickets     <- managed login: create a ticket (hosted browser)
+  GET  /auth/tickets/{id}<- poll a ticket; when done it returns your API key
+  Each user gets a private API key + a private NotebookLM session (per-user
+  storage_state). /ask, /memory/* etc. resolve the key -> the user's session.
+
+Storage of users: auto-detected (Upstash KV -> Vercel Blob -> local files),
+see brainbridge/users_store.py.
 
 Every call lands in Google NotebookLM ("the brain"). No MCP client needed.
-
-It also hosts the AUTH endpoints, so "add notebooklm auth" lives here:
-  POST /auth/import    <- Cookie-Editor JSON export  (token unlock)
-  POST /auth/refresh   <- rotate token (keepalive)
-  GET  /auth/export    <- base64 of the session state (paste into Vercel env)
-
-Deployment:
-  Local:    python3 -m uvicorn brainbridge.gateway:app --host 0.0.0.0 --port 8999
-  Vercel:   api/index.py mounts this app under /api/* ; session is restored
-            from BRAINBRIDGE_STATE_B64 and the key from BRAINBRIDGE_GATEWAY_KEY.
-
-Key:  env BRAINBRIDGE_GATEWAY_KEY (Vercel) → else ~/.notebooklm/gateway_key.txt.
-Send it as:  Authorization: Bearer <key>
 """
 
 from __future__ import annotations
@@ -38,7 +31,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+
+from .users_store import get_store, store_name
 
 # ---------------------------------------------------------------------------
 # Brain registry — keep in sync with server.py (BRAIN_REGISTRY)
@@ -80,8 +76,6 @@ def _get_api_key() -> str:
             pass
         return key
     except OSError:
-        # Read-only home (Vercel) -> only the env var works; don't crash the
-        # whole deployment at import time — endpoints will 503 with a hint.
         return ""
 
 
@@ -90,17 +84,14 @@ API_KEY = _get_api_key()
 # Session state: local default, or overridden by BRAINBRIDGE_STORAGE (Vercel /tmp)
 DEFAULT_STORAGE = str(Path.home() / ".notebooklm" / "profiles" / "default" / "storage_state.json")
 STORAGE = Path(os.environ.get("BRAINBRIDGE_STORAGE", DEFAULT_STORAGE)).expanduser()
+OWNER_SESSION = os.environ.get("BRAINBRIDGE_OWNER_SESSION", "owner")
 
 
 def bootstrap_state() -> None:
-    """On boot (Vercel): restore the session from BRAINBRIDGE_STATE_B64 if needed.
+    """On boot (Vercel): restore the owner session from BRAINBRIDGE_STATE_B64.
 
-    The value is base64 of storage_state.json. A gzipped payload (gzip magic
-    bytes 1f 8b) is also accepted, so the value fits Vercel's ~4KB env-var
-    budget for serverless functions.
-
-    For serverless correctness we always re-restore from the env on boot:
-    /tmp is ephemeral and may hold stale bytes from a previous invocation.
+    Gzipped payloads (gzip magic 1f 8b) are accepted so the value fits the
+    ~4KB Vercel env-var budget. Always re-restored on boot: /tmp is ephemeral.
     """
     state_b64 = os.environ.get("BRAINBRIDGE_STATE_B64", "").strip()
     if not state_b64:
@@ -124,35 +115,84 @@ def _state_b64() -> str:
     return ""
 
 
-def _check_key(authorization: str | None) -> None:
+# ---------------------------------------------------------------------------
+# Auth: owner key OR per-user key -> context dict
+# ---------------------------------------------------------------------------
+def _require_api_key() -> None:
     if not API_KEY:
         raise HTTPException(
             503,
-            "BRAINBRIDGE_GATEWAY_KEY is not set on the server. Set it in the "
-            "Vercel env (same value as the key you send clients).",
+            "BRAINBRIDGE_GATEWAY_KEY is not set on the server.",
         )
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            401,
-            "Missing key. Send 'Authorization: Bearer <key>' "
-            "(env BRAINBRIDGE_GATEWAY_KEY, or ~/.notebooklm/gateway_key.txt locally).",
-        )
-    if authorization.split(" ", 1)[1].strip() != API_KEY:
+
+
+def _authorize(authorization: str | None) -> dict:
+    """Return {'user': None} for the owner, or {'user': rec} for a user key."""
+    _require_api_key()
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+        if token == API_KEY:
+            return {"user": None}
+        rec = get_store().get_user(token)
+        if rec:
+            return {"user": rec}
         raise HTTPException(403, "Invalid key")
+    raise HTTPException(
+        401,
+        "Missing key. Send 'Authorization: Bearer <key>' "
+        "(owner key = env BRAINBRIDGE_GATEWAY_KEY; user keys come from /auth/register).",
+    )
 
 
-def _run(args: list[str], timeout: int = 180) -> str:
+_user_tmp: dict[str, str] = {}
+
+
+def _storage_for(ctx: dict) -> Path:
+    if ctx.get("user") is None:
+        return STORAGE
+    key: str = ctx["user"]["key"]
+    path = _user_tmp.get(key)
+    if not path:
+        path = str(Path(tempfile.gettempdir()) / f"bbstate_{key[:12]}.json")
+        _user_tmp[key] = path
+    p = Path(path)
+    # refresh the user's state file on demand (cheap compare-by-size+check)
+    state_b64 = ctx["user"].get("state_b64", "")
+    try:
+        new = base64.b64decode(state_b64)
+        if not p.exists() or p.stat().st_size != len(new):
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(new)
+    except Exception as e:  # noqa: BLE001
+        print(f"[bridge] user {key[:8]}: bad state_b64: {e}", file=sys.stderr)
+    return p
+
+
+def _run(args: list[str], storage: Path | None = None, timeout: int = 180) -> str:
     """Run the notebooklm CLI (works locally AND on Vercel: python -m notebooklm)."""
+    s = str(storage) if storage is not None else str(STORAGE)
     proc = subprocess.run(
-        [sys.executable, "-m", "notebooklm", "--storage", str(STORAGE), *args],
+        [sys.executable, "-m", "notebooklm", "--storage", s, *args],
         capture_output=True, text=True, timeout=timeout,
     )
     return ((proc.stdout or "") + (proc.stderr or "")).strip()
 
 
-def _session_ok() -> tuple[bool, str]:
-    out = _run(["auth", "check", "--test"], timeout=120)
+def _session_ok(ctx: dict) -> tuple[bool, str]:
+    out = _run(["auth", "check", "--test"], storage=_storage_for(ctx), timeout=120)
     return ("Authentication is valid" in out), out[:600]
+
+
+def _require_session(ctx: dict) -> None:
+    ok, detail = _session_ok(ctx)
+    if ok:
+        return
+    raise HTTPException(
+        401,
+        "NotebookLM session expired. Unlock it: POST /auth/register with a fresh "
+        "Cookie-Editor JSON export (notebooklm.google.com + accounts.google.com), "
+        "then POST /auth/refresh. Detail: " + detail[:300],
+    )
 
 
 def _resolve_brain(target: str | None) -> dict[str, str]:
@@ -167,18 +207,6 @@ def _resolve_brain(target: str | None) -> dict[str, str]:
         if t and entry["default_title"].lower().startswith(t):
             return entry
     raise HTTPException(404, f"Unknown brain '{target}'. Known: " + ", ".join(BRAIN_REGISTRY))
-
-
-def _require_session() -> None:
-    ok, detail = _session_ok()
-    if ok:
-        return
-    raise HTTPException(
-        401,
-        "NotebookLM session expired. Unlock it: POST /auth/import with a fresh "
-        "Cookie-Editor JSON export (notebooklm.google.com + accounts.google.com), "
-        "then POST /auth/refresh. Detail: " + detail[:300],
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -205,32 +233,58 @@ class ImportIn(BaseModel):
     file: str | None = None            # or path to a JSON file on disk
 
 
+class RegisterIn(BaseModel):
+    cookies: list[dict] | None = None  # Cookie-Editor JSON export (array or {cookies:[...]})
+    state: dict | None = None          # full Playwright storage_state object
+    state_b64: str | None = None       # base64 (raw or gzipped) of storage_state.json
+    label: str | None = None           # optional display name
+
+
+class TicketUrlIn(BaseModel):
+    browser_url: str
+    browser_password: str | None = None
+
+
+class CollectIn(BaseModel):
+    state_b64: str
+    label: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
-app = FastAPI(title="BrainBridge Gateway", version="1.0",
-              description="NotebookLM brain bridge — any AI can ask & save.")
+app = FastAPI(title="BrainBridge Gateway", version="2.0",
+              description="NotebookLM brain bridge — any AI can ask & save. "
+                          "Multi-user: each API key = its own private NotebookLM session.")
 
 
 @app.get("/")
 def home():
     return {
         "name": "BrainBridge Gateway",
+        "version": "2.0 (multi-user)",
         "status": "ok",
-        "auth": "Authorization: Bearer <key> (env BRAINBRIDGE_GATEWAY_KEY)",
+        "store": store_name(),
+        "auth": "Authorization: Bearer <key> (owner key, or your /auth/register key)",
         "endpoints": {
             "GET  /health": "public",
-            "GET  /status": "session health",
+            "GET  /status": "session health (for YOUR key)",
             "GET  /brains": "your notebooks",
             "POST /ask": {"question": "...", "brain": "personal|project"},
             "POST /memory/save": {"title": "...", "content": "..."},
             "GET  /memory/list": "?keyword=&brain=",
             "GET  /memory/read": "?source_id=&brain=",
             "GET  /memory/context": "?brain=",
-            "POST /auth/import": "cookie JSON (unlock session)",
-            "POST /auth/refresh": "rotate token (keepalive)",
-            "GET  /auth/export": "base64 session state (paste into Vercel env)",
+            "POST /auth/register": "MULTI-USER: paste cookies/state -> get your API key",
+            "POST /auth/tickets": "MULTI-USER: create a managed-login ticket",
+            "GET  /auth/tickets/{id}": "poll ticket -> your API key",
+            "GET  /users": "owner only: list users",
+            "DELETE /users/{key}": "owner only: remove a user",
+            "POST /auth/import": "owner only: cookie JSON (unlock session)",
+            "POST /auth/refresh": "rotate token (keepalive; works for any key)",
+            "GET  /auth/export": "owner only: base64 session state",
         },
+        "connect_page": "/connect",
         "ai_prompt": (
             "You have access to the user's permanent brain (Google NotebookLM) via "
             "BrainBridge: POST {base}/ask to answer questions from memory, "
@@ -246,18 +300,28 @@ def health():
     return {"ok": True, "service": "brainbridge-gateway"}
 
 
+@app.get("/connect", response_class=HTMLResponse, include_in_schema=False)
+def connect_page():
+    """The multi-user connect page (paste-export + managed login tabs)."""
+    p = Path(__file__).resolve().parent.parent / "api" / "connect.html"
+    if p.exists():
+        return HTMLResponse(p.read_text(encoding="utf-8").replace("{{API_BASE}}", ""))
+    return HTMLResponse("<h1>BrainBridge Connect</h1><p>POST /auth/register</p>")
+
+
 @app.get("/status")
 def status(authorization: str | None = Header(default=None)):
-    _check_key(authorization)
-    valid, detail = _session_ok()
-    return {"valid": valid, "detail": detail[:600]}
+    ctx = _authorize(authorization)
+    valid, detail = _session_ok(ctx)
+    who = "owner" if ctx.get("user") is None else f"user·{ctx['user']['key'][:8]}"
+    return {"valid": valid, "who": who, "detail": detail[:600]}
 
 
 @app.get("/brains")
 def brains(authorization: str | None = Header(default=None)):
-    _check_key(authorization)
-    _require_session()
-    out = _run(["list", "--json"])
+    ctx = _authorize(authorization)
+    _require_session(ctx)
+    out = _run(["list", "--json"], storage=_storage_for(ctx))
     try:
         data = json.loads(out)
         return {"notebooks": [{"id": n.get("id"), "title": n.get("title"),
@@ -268,10 +332,11 @@ def brains(authorization: str | None = Header(default=None)):
 
 @app.post("/ask")
 def ask(req: AskIn, authorization: str | None = Header(default=None)):
-    _check_key(authorization)
-    _require_session()
+    ctx = _authorize(authorization)
+    _require_session(ctx)
     entry = _resolve_brain(req.brain)
-    out = _run(["ask", "--json", "--notebook", entry["id"], req.question], timeout=300)
+    out = _run(["ask", "--json", "--notebook", entry["id"], req.question],
+               storage=_storage_for(ctx), timeout=300)
     try:
         data = json.loads(out)
         answer = data.get("answer") or data.get("text") or out
@@ -282,8 +347,8 @@ def ask(req: AskIn, authorization: str | None = Header(default=None)):
 
 @app.post("/memory/save")
 def memory_save(req: SaveIn, authorization: str | None = Header(default=None)):
-    _check_key(authorization)
-    _require_session()
+    ctx = _authorize(authorization)
+    _require_session(ctx)
     entry = _resolve_brain(req.brain)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     filename = f"{req.title.strip().lower().replace(' ', '-')}-{today}.md"
@@ -292,7 +357,8 @@ def memory_save(req: SaveIn, authorization: str | None = Header(default=None)):
         f.write(md)
         tmp = f.name
     out = _run(["source", "add", tmp, "--type", "file", "--mime-type", "text/markdown",
-                "--title", filename.removesuffix(".md"), "--notebook", entry["id"]])
+                "--title", filename.removesuffix(".md"), "--notebook", entry["id"]],
+               storage=_storage_for(ctx))
     Path(tmp).unlink(missing_ok=True)
     return {"brain": entry["default_title"], "title": filename, "raw": out[:400]}
 
@@ -300,10 +366,10 @@ def memory_save(req: SaveIn, authorization: str | None = Header(default=None)):
 @app.get("/memory/list")
 def memory_list(keyword: str | None = None, brain: str | None = None,
                 authorization: str | None = Header(default=None)):
-    _check_key(authorization)
-    _require_session()
+    ctx = _authorize(authorization)
+    _require_session(ctx)
     entry = _resolve_brain(brain)
-    out = _run(["source", "list", "--notebook", entry["id"], "--json"])
+    out = _run(["source", "list", "--notebook", entry["id"], "--json"], storage=_storage_for(ctx))
     try:
         data = json.loads(out)
         sources = data.get("sources", data if isinstance(data, list) else [])
@@ -322,12 +388,12 @@ def memory_list(keyword: str | None = None, brain: str | None = None,
 @app.get("/memory/read")
 def memory_read(source_id: str, brain: str | None = None,
                 authorization: str | None = Header(default=None)):
-    _check_key(authorization)
-    _require_session()
+    ctx = _authorize(authorization)
+    _require_session(ctx)
     entry = _resolve_brain(brain)
     tmp = Path(tempfile.mktemp(prefix="gateway_read_", suffix=".md"))
     out = _run(["source", "fulltext", source_id, "--notebook", entry["id"],
-                "--format", "markdown", "-o", str(tmp)])
+                "--format", "markdown", "-o", str(tmp)], storage=_storage_for(ctx))
     content = tmp.read_text(encoding="utf-8") if tmp.exists() else out
     tmp.unlink(missing_ok=True)
     return {"brain": entry["default_title"], "source_id": source_id,
@@ -337,10 +403,10 @@ def memory_read(source_id: str, brain: str | None = None,
 @app.get("/memory/context")
 def memory_context(brain: str | None = None, max_entries: int = 6,
                    authorization: str | None = Header(default=None)):
-    _check_key(authorization)
-    _require_session()
+    ctx = _authorize(authorization)
+    _require_session(ctx)
     entry = _resolve_brain(brain)
-    out = _run(["source", "list", "--notebook", entry["id"], "--json"])
+    out = _run(["source", "list", "--notebook", entry["id"], "--json"], storage=_storage_for(ctx))
     try:
         data = json.loads(out)
         sources = data.get("sources", data if isinstance(data, list) else [])
@@ -351,10 +417,116 @@ def memory_context(brain: str | None = None, max_entries: int = 6,
             "recent_sources": [{"id": s.get("id"), "title": s.get("title")} for s in sources]}
 
 
+# ---------------------------------------------------------------------------
+# MULTI-USER: register + per-user auth
+# ---------------------------------------------------------------------------
+def _decode_state(state_b64: str) -> bytes:
+    data = base64.b64decode(state_b64)
+    if data[:2] == b"\x1f\x8b":
+        data = gzip.decompress(data)
+    return data
+
+
+def _validate_state(storage: Path) -> tuple[bool, str]:
+    out = _run(["auth", "check", "--test"], storage=storage, timeout=120)
+    return ("Authentication is valid" in out), out[:300]
+
+
+@app.post("/auth/register")
+def auth_register(req: RegisterIn):
+    """Public: paste a Cookie-Editor export (or storage state) -> get YOUR API key.
+
+    The gateway validates the session with Google before handing out the key.
+    """
+    store = get_store()
+    if req.state_b64:
+        try:
+            data = _decode_state(req.state_b64)
+        except Exception as e:
+            raise HTTPException(400, f"state_b64 invalid: {e}")
+    elif req.state:
+        data = json.dumps(req.state).encode()
+    elif req.cookies:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(req.cookies, f)
+            tmp_cookies = f.name
+        storage = Path(tempfile.mktemp(prefix="bb_reg_", suffix=".json"))
+        storage.parent.mkdir(parents=True, exist_ok=True)
+        out = _run(["auth", "import-cookies", tmp_cookies], storage=storage, timeout=180)
+        Path(tmp_cookies).unlink(missing_ok=True)
+        if "__Secure-1PSIDTS" in out and "Missing required cookies" in out:
+            raise HTTPException(
+                400,
+                "The export has no __Secure-1PSIDTS (Google rotates it per browser). "
+                "Open notebook.google.com while logged in, then export again — or use "
+                "the managed login (POST /auth/tickets). Detail: " + out[:300],
+            )
+        valid, detail = _validate_state(storage)
+        if not valid:
+            raise HTTPException(401, "Import did not produce a valid session. " + (out + " " + detail)[:400])
+        data = storage.read_bytes()
+        storage.unlink(missing_ok=True)
+    else:
+        raise HTTPException(400, "Provide 'cookies', 'state' or 'state_b64'")
+
+    # validate before storing
+    storage = Path(tempfile.mktemp(prefix="bb_reg_", suffix=".json"))
+    storage.write_bytes(data)
+    valid, detail = _validate_state(storage)
+    if not valid:
+        storage.unlink(missing_ok=True)
+        raise HTTPException(401, "Session is not valid for Google. Detail: " + detail[:300])
+
+    key = secrets.token_urlsafe(24)
+    rec = {
+        "key": key,
+        "label": (req.label or "").strip()[:80] or "user",
+        "state_b64": base64.b64encode(data).decode(),
+        "created": int(datetime.now(timezone.utc).timestamp()),
+        "updated": int(datetime.now(timezone.utc).timestamp()),
+        "note": "register",
+    }
+    store.put_user(rec)
+    return {
+        "ok": True,
+        "api_key": key,
+        "label": rec["label"],
+        "base": str(os.environ.get("BRAINBRIDGE_PUBLIC_BASE", "")).rstrip("/") or "/",
+        "usage": {
+            "status": "GET /status",
+            "brains": "GET /brains",
+            "ask": "POST /ask  {question, brain}",
+            "save": "POST /memory/save  {title, content, brain}",
+            "context": "GET /memory/context",
+        },
+        "tip": "Send 'Authorization: Bearer <api_key>' with every call. Your session "
+               "is private to this key and refreshed automatically.",
+    }
+
+
+@app.post("/auth/refresh")
+def auth_refresh(authorization: str | None = Header(default=None)):
+    """Rotate the token NOW (keepalive) for whichever key you send."""
+    ctx = _authorize(authorization)
+    storage = _storage_for(ctx)
+    out = _run(["auth", "refresh"], storage=storage, timeout=120)
+    valid, detail = _validate_state(storage)
+    if ctx.get("user") is not None:
+        rec = dict(ctx["user"])
+        if valid and storage.exists():
+            rec["state_b64"] = base64.b64encode(storage.read_bytes()).decode()
+        rec["updated"] = int(datetime.now(timezone.utc).timestamp())
+        get_store().put_user(rec)
+    return {"ok": valid, "refresh": out[:300], "detail": detail[:300],
+            "state_b64": _state_b64() if valid and ctx.get("user") is None else ""}
+
+
 @app.post("/auth/import")
 def auth_import(req: ImportIn, authorization: str | None = Header(default=None)):
-    """Unlock: paste a Cookie-Editor JSON export (notebooklm.google.com + accounts.google.com)."""
-    _check_key(authorization)
+    """Owner only: unlock the owner session (paste a Cookie-Editor JSON export)."""
+    ctx = _authorize(authorization)
+    if ctx.get("user") is not None:
+        raise HTTPException(403, "Owner only; users refresh their own key via /auth/refresh")
     if not req.cookies and not req.file:
         raise HTTPException(400, "Provide 'cookies' (array) or 'file' (path to JSON)")
     if req.file:
@@ -367,40 +539,177 @@ def auth_import(req: ImportIn, authorization: str | None = Header(default=None))
         tmp = f.name
     out = _run(["auth", "import-cookies", tmp], timeout=180)
     Path(tmp).unlink(missing_ok=True)
-    valid, detail = _session_ok()
+    valid, detail = _session_ok(ctx)
     if not valid:
         raise HTTPException(401, "Import did not produce a valid session. " + out[:400])
     return {"ok": True, "session": "valid", "detail": (out + "\n" + detail)[:400],
             "state_b64": _state_b64()}
 
 
-@app.post("/auth/refresh")
-def auth_refresh(authorization: str | None = Header(default=None)):
-    """Rotate the token now (keepalive). Use /status to confirm."""
-    _check_key(authorization)
-    out = _run(["auth", "refresh"], timeout=120)
-    valid, detail = _session_ok()
-    return {"ok": valid, "refresh": out[:300], "detail": detail[:300],
-            "state_b64": _state_b64() if valid else ""}
-
-
 @app.get("/auth/export")
 def auth_export(authorization: str | None = Header(default=None)):
-    """Base64 of the current session state — save it into BRAINBRIDGE_STATE_B64."""
-    _check_key(authorization)
+    """Owner only: base64 of the current session state (for BRAINBRIDGE_STATE_B64)."""
+    ctx = _authorize(authorization)
+    if ctx.get("user") is not None:
+        raise HTTPException(403, "Owner only")
     state = _state_b64()
     return {"ok": bool(state), "state_b64": state,
-            "tip": "Paste this into the Vercel env var BRAINBRIDGE_STATE_B64 so the "
-                   "session survives cold starts, or set it locally."}
+            "tip": "Paste this into the Vercel env var BRAINBRIDGE_STATE_B64."}
 
 
+# ---------------------------------------------------------------------------
+# MULTI-USER: managed-login tickets (hosted browser flow)
+# ---------------------------------------------------------------------------
+@app.post("/auth/tickets")
+def ticket_create(label: str | None = None):
+    """Public: create a managed-login ticket. Poll GET /auth/tickets/{id}."""
+    store = get_store()
+    tid = secrets.token_hex(8)
+    rec = {"ticket_id": tid, "status": "pending", "label": (label or "").strip()[:80],
+           "created": int(datetime.now(timezone.utc).timestamp()),
+           "browser_url": os.environ.get("BRAINBRIDGE_BROWSER_URL", ""),
+           "browser_password": os.environ.get("BRAINBRIDGE_BROWSER_PASSWORD", "")}
+    store.put_ticket(rec)
+    return {"ok": True, "ticket_id": tid, "status": rec["status"],
+            "browser_url": rec["browser_url"], "poll": f"/auth/tickets/{tid}"}
+
+
+@app.get("/auth/tickets/next")
+def ticket_next(authorization: str | None = Header(default=None)):
+    """Owner only: pick the oldest pending ticket (the hosted-browser worker)."""
+    ctx = _authorize(authorization)
+    if ctx.get("user") is not None:
+        raise HTTPException(403, "Owner only")
+    store = get_store()
+    pending = [t for t in store.list_tickets() if t.get("status") == "pending"]
+    pending.sort(key=lambda t: t.get("created", 0))
+    if not pending:
+        return {"ticket_id": None}
+    t = pending[0]
+    t["status"] = "open"  # claimed by the worker
+    t["claimed"] = int(datetime.now(timezone.utc).timestamp())
+    store.put_ticket(t)
+    return {"ticket_id": t["ticket_id"], "status": "open", "label": t.get("label", "")}
+
+
+@app.post("/auth/tickets/{ticket_id}/url")
+def ticket_set_url(ticket_id: str, req: TicketUrlIn, authorization: str | None = Header(default=None)):
+    """Owner only: the worker tells the gateway the hosted-browser URL + password."""
+    ctx = _authorize(authorization)
+    if ctx.get("user") is not None:
+        raise HTTPException(403, "Owner only")
+    store = get_store()
+    t = store.get_ticket(ticket_id)
+    if not t:
+        raise HTTPException(404, "no such ticket")
+    t["browser_url"] = req.browser_url
+    pw = req.browser_password or os.environ.get("BRAINBRIDGE_BROWSER_PASSWORD", "")
+    if pw:
+        t["browser_password"] = pw
+    store.put_ticket(t)
+    return {"ok": True}
+
+
+@app.post("/auth/tickets/{ticket_id}/collect")
+def ticket_collect(ticket_id: str, req: CollectIn, authorization: str | None = Header(default=None)):
+    """Owner only: worker uploads the session state captured in the hosted browser."""
+    ctx = _authorize(authorization)
+    if ctx.get("user") is not None:
+        raise HTTPException(403, "Owner only")
+    store = get_store()
+    t = store.get_ticket(ticket_id)
+    if not t:
+        raise HTTPException(404, "no such ticket")
+    try:
+        data = _decode_state(req.state_b64)
+    except Exception as e:
+        raise HTTPException(400, f"state_b64 invalid: {e}")
+    storage = Path(tempfile.mktemp(prefix="bb_collect_", suffix=".json"))
+    storage.write_bytes(data)
+    valid, detail = _validate_state(storage)
+    if not valid:
+        storage.unlink(missing_ok=True)
+        raise HTTPException(401, "Captured session is not valid. Detail: " + detail[:300])
+    key = secrets.token_urlsafe(24)
+    rec = {
+        "key": key,
+        "label": (req.label or t.get("label") or "").strip()[:80] or "user",
+        "state_b64": base64.b64encode(data).decode(),
+        "created": int(datetime.now(timezone.utc).timestamp()),
+        "updated": int(datetime.now(timezone.utc).timestamp()),
+        "note": f"ticket:{ticket_id}",
+    }
+    store.put_user(rec)
+    t["status"] = "done"
+    t["api_key"] = key
+    t["done"] = int(datetime.now(timezone.utc).timestamp())
+    store.put_ticket(t)
+    storage.unlink(missing_ok=True)
+    return {"ok": True, "status": "done", "api_key": key}
+
+
+@app.post("/auth/tickets/{ticket_id}/fail")
+def ticket_fail(ticket_id: str, authorization: str | None = Header(default=None)):
+    """Owner only: mark a ticket failed (login timeout / browser error)."""
+    ctx = _authorize(authorization)
+    if ctx.get("user") is not None:
+        raise HTTPException(403, "Owner only")
+    store = get_store()
+    t = store.get_ticket(ticket_id)
+    if not t:
+        raise HTTPException(404, "no such ticket")
+    t["status"] = "failed"
+    store.put_ticket(t)
+    return {"ok": True}
+
+
+@app.get("/auth/tickets/{ticket_id}")
+def ticket_get(ticket_id: str):
+    """Public: poll your ticket. When status=done, 'api_key' is YOUR key."""
+    t = get_store().get_ticket(ticket_id)
+    if not t:
+        raise HTTPException(404, "no such ticket")
+    return {
+        "ticket_id": ticket_id,
+        "status": t.get("status"),
+        "browser_url": t.get("browser_url", ""),
+        "browser_password": t.get("browser_password", ""),
+        "api_key": t.get("api_key") if t.get("status") == "done" else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# OWNER: user administration
+# ---------------------------------------------------------------------------
+@app.get("/users")
+def users_list(authorization: str | None = Header(default=None)):
+    ctx = _authorize(authorization)
+    if ctx.get("user") is not None:
+        raise HTTPException(403, "Owner only")
+    store = get_store()
+    out = []
+    for u in store.list_users():
+        out.append({"key": u["key"], "label": u.get("label", ""),
+                    "created": u.get("created"), "updated": u.get("updated"),
+                    "note": u.get("note", "")})
+    return {"users": out, "count": len(out), "store": store_name()}
+
+
+@app.delete("/users/{key}")
+def user_delete(key: str, authorization: str | None = Header(default=None)):
+    ctx = _authorize(authorization)
+    if ctx.get("user") is not None:
+        raise HTTPException(403, "Owner only")
+    ok = get_store().delete_user(key)
+    return {"ok": ok, "deleted": key if ok else None}
+
+
+# ---------------------------------------------------------------------------
+# Keepalive (Vercel cron)
+# ---------------------------------------------------------------------------
 @app.api_route("/cron/keepalive", methods=["GET", "POST"])
 def cron_keepalive(request: Request, authorization: str | None = Header(default=None)):
-    """Keepalive endpoint for Vercel Cron.
-
-    Protected two ways: Vercel Cron requests carry 'user-agent: vercel-cron/1.0'
-    (checked here), or an explicit Bearer key. Rotates __Secure-1PSIDTS."
-    """
+    """Keepalive for Vercel Cron: refresh the owner + every registered user."""
     ua = (request.headers.get("user-agent") or "").lower()
     cron_ok = ua.startswith("vercel-cron")
     key_ok = False
@@ -408,9 +717,41 @@ def cron_keepalive(request: Request, authorization: str | None = Header(default=
         key_ok = authorization.split(" ", 1)[1].strip() == API_KEY
     if not (cron_ok or key_ok):
         raise HTTPException(403, "cron only")
-    out = _run(["auth", "refresh"], timeout=120)
-    valid, detail = _session_ok()
-    return {"ok": valid, "refresh": out[:200], "detail": detail[:200]}
+
+    result = {"owner": None, "users": {"ok": 0, "fail": 0, "skipped": 0}}
+    # owner
+    try:
+        out = _run(["auth", "refresh"], timeout=120)
+        valid, detail = _validate_state(STORAGE)
+        result["owner"] = {"ok": valid, "detail": detail[:150]}
+    except Exception as e:  # noqa: BLE001
+        result["owner"] = {"ok": False, "detail": str(e)[:150]}
+
+    # users (bounded per run)
+    store = get_store()
+    try:
+        users = store.list_users()
+    except Exception as e:  # noqa: BLE001
+        return {**result, "error": f"store: {e}"}
+    for u in users[:40]:
+        try:
+            storage = Path(tempfile.mktemp(prefix="bb_kp_", suffix=".json"))
+            storage.write_bytes(base64.b64decode(u.get("state_b64", "")))
+            out = _run(["auth", "refresh"], storage=storage, timeout=120)
+            valid, _ = _validate_state(storage)
+            if valid:
+                u["state_b64"] = base64.b64encode(storage.read_bytes()).decode()
+                u["updated"] = int(datetime.now(timezone.utc).timestamp())
+                store.put_user(u)
+                result["users"]["ok"] += 1
+            else:
+                result["users"]["fail"] += 1
+            storage.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            result["users"]["fail"] += 1
+    result["users"]["skipped"] = max(0, len(users) - 40)
+    result["total_users"] = len(users)
+    return result
 
 
 if __name__ == "__main__":

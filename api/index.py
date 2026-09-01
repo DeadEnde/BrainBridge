@@ -53,4 +53,15 @@ def root_page():
     return HTMLResponse("<h1>BrainBridge Gateway</h1><p>API at <code>/api/*</code></p>")
 
 
+@app.get("/connect", response_class=HTMLResponse, include_in_schema=False)
+def connect_page():
+    """Multi-user connect page (paste export + managed login)."""
+    p = _P(__file__).parent / "connect.html"
+    if p.exists():
+        return HTMLResponse(
+            p.read_text(encoding="utf-8").replace("{{API_BASE}}", "/api")
+        )
+    return HTMLResponse("<h1>BrainBridge Connect</h1><p>POST /api/auth/register</p>")
+
+
 app.mount("/api", gateway_app)

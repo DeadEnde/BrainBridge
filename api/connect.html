@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BrainBridge — Connect your brain</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh;color:#eef0f8;
+       background:radial-gradient(1200px 700px at 20% 0%,#1e1b4b,transparent 55%),radial-gradient(1000px 600px at 90% 100%,#4c1d95,transparent 50%),#0a0c14}
+  .wrap{max-width:860px;margin:0 auto;padding:48px 20px 60px}
+  h1{font-size:1.9rem;margin-bottom:6px;background:linear-gradient(90deg,#a78bfa,#f472b6,#38bdf8);
+     -webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:#9aa7d8;margin-bottom:28px;font-size:.95rem}
+  .tabs{display:flex;gap:8px;margin-bottom:18px}
+  .tab{flex:1;padding:13px 10px;border:1px solid rgba(255,255,255,.14);border-radius:14px;background:rgba(255,255,255,.04);
+       color:#cbd5f1;font-weight:600;font-size:.9rem;cursor:pointer;text-align:center;transition:.15s}
+  .tab.on{background:linear-gradient(90deg,rgba(139,92,246,.35),rgba(236,72,153,.25));border-color:#a78bfa;color:#fff}
+  .panel{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);border-radius:18px;padding:26px;display:none}
+  .panel.on{display:block}
+  textarea{width:100%;min-height:170px;background:#0d1020;border:1px solid rgba(255,255,255,.15);border-radius:12px;
+           color:#e6e9f5;font-family:ui-monospace,Menlo,monospace;font-size:.78rem;padding:14px;resize:vertical}
+  input[type=text]{width:100%;background:#0d1020;border:1px solid rgba(255,255,255,.15);border-radius:12px;
+           color:#e6e9f5;font-size:.9rem;padding:13px 14px}
+  label{display:block;color:#9aa7d8;font-size:.8rem;margin:14px 0 6px}
+  button{margin-top:16px;padding:13px 26px;border:0;border-radius:12px;font-weight:700;font-size:.92rem;cursor:pointer;
+         background:linear-gradient(90deg,#8b5cf6,#ec4899);color:#fff}
+  button:disabled{opacity:.5;cursor:wait}
+  .out{margin-top:18px;background:rgba(34,211,153,.08);border:1px solid rgba(34,211,153,.35);border-radius:14px;
+       padding:16px;display:none;font-size:.85rem;line-height:1.7}
+  .out.on{display:block}
+  .out.err{background:rgba(248,113,113,.08);border-color:rgba(248,113,113,.4)}
+  .key{font-family:ui-monospace,Menlo,monospace;background:#0d1020;border:1px dashed rgba(167,139,250,.5);
+       border-radius:10px;padding:12px;font-size:.8rem;word-break:break-all;margin:8px 0}
+  code{background:rgba(255,255,255,.08);padding:2px 7px;border-radius:7px;font-size:.78rem}
+  .hint{color:#8b93a7;font-size:.8rem;margin-top:10px;line-height:1.6}
+  .steps{color:#cbd5f1;font-size:.86rem;line-height:1.9}
+  .steps b{color:#c4b5fd}
+  .spin{display:inline-block;width:14px;height:14px;border:2px solid #a78bfa;border-top-color:transparent;
+        border-radius:50%;animation:sp 1s linear infinite;vertical-align:-2px;margin-right:6px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body data-api="{{API_BASE}}">
+<div class="wrap">
+  <h1>🧠 BrainBridge — Connect</h1>
+  <p class="sub">Kola user kay-connecti <b>session dyalo</b> → kayakhod <b>API key privée</b> → y-3tiha l-ay AI model. L-session tbqa 7ayya (keepalive automatique).</p>
+
+  <div class="tabs">
+    <div class="tab on" id="tabA" onclick="pick('a')">📋 Paste export (Cookie-Editor)</div>
+    <div class="tab" id="tabB" onclick="pick('b')">🖥️ Managed login (hosted browser)</div>
+  </div>
+
+  <!-- Tab A: paste -->
+  <div class="panel on" id="panelA">
+    <div class="steps">
+      <b>1.</b> 7ell <code>notebook.google.com</code> w dkhel l-compte dyalk (Google login 3adi).<br>
+      <b>2.</b> F Chrome/Edge: extension <b>Cookie-Editor</b> → Export → <b>Export as JSON</b> (f l-tab dyal notebook.google.com).<br>
+      <b>3.</b> Paste l-JSON hna l-te7t w klek <b>Connect</b>.
+    </div>
+    <label>Cookie-Editor JSON export (mn notebook.google.com):</label>
+    <textarea id="paste" placeholder='[{"name":"SID","value":"...","domain":".google.com",...}]'></textarea>
+    <button id="btnA" onclick="register()">🔑 Connect &amp; get my API key</button>
+    <div class="hint">Ila khrej error "no __Secure-1PSIDTS" — 7ell notebook.google.com m3a l-login w exporti 3awd, wla khdem b <b>Managed login</b>.</div>
+    <div class="out" id="outA"></div>
+  </div>
+
+  <!-- Tab B: managed -->
+  <div class="panel" id="panelB">
+    <div class="steps">
+      <b>1.</b> Klek <b>Start managed login</b> — kay-t-creer ticket.<br>
+      <b>2.</b> 7ell l-link dyal <b>hosted browser</b> (VNC) — password: <code>Brain2026</code>.<br>
+      <b>3.</b> Dkhel email/password dyal Google f l-fenetre li t-7ell, w khelli <code>notebook.google.com</code> t7el.<br>
+      <b>4.</b> Rje3 hna — l-page kat-poll automatiquement → t-lqa <b>API key dyalk</b> ✅
+    </div>
+    <button id="btnB" onclick="startTicket()">🖥️ Start managed login</button>
+    <div class="out" id="outB"></div>
+  </div>
+</div>
+
+<script>
+const API = document.body.dataset.api || "";
+function pick(t){
+  document.getElementById('tabA').classList.toggle('on', t==='a');
+  document.getElementById('tabB').classList.toggle('on', t==='b');
+  document.getElementById('panelA').classList.toggle('on', t==='a');
+  document.getElementById('panelB').classList.toggle('on', t==='b');
+}
+function show(id, html, err){
+  const el = document.getElementById(id);
+  el.innerHTML = html; el.className = 'out on' + (err ? ' err' : '');
+  el.scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+function keyCard(key){
+  return `<div class="key">${key}</div>
+    <div>Header: <code>Authorization: Bearer ${key}</code></div>
+    <div style="margin-top:8px">
+      <code>curl ${API}/ask -H "Authorization: Bearer ..." -H "Content-Type: application/json"
+      -d '{"question":"Wsh kayn f l-brain?"}'</code>
+    </div>
+    <div class="hint">Hadi l-key dyalk — 3tiha l'ay AI model bach yso9el l-brain dyalk (memoria dyalk, bla ma ydkhel l-Google). Ma t-charehach.</div>`;
+}
+async function register(){
+  const btn = document.getElementById('btnA');
+  let txt = document.getElementById('paste').value.trim();
+  if(!txt){ show('outA','Dkhel l-JSON awal 😅',true); return; }
+  let cookies=null; try{ cookies = JSON.parse(txt); }catch(e){ show('outA','JSON invalid: '+e.message,true); return; }
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Connecting...';
+  try{
+    const r = await fetch(API+'/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({cookies: cookies})});
+    const d = await r.json();
+    if(!r.ok){ show('outA', '❌ ' + (d.detail||d).slice(0,500), true); }
+    else{ show('outA', '<b>✅ Connected!</b><br>API key dyalk:' + keyCard(d.api_key)); }
+  }catch(e){ show('outA','❌ Network: '+e.message,true); }
+  btn.disabled=false; btn.innerHTML='🔑 Connect &amp; get my API key';
+}
+let ticketId=null, pollTimer=null;
+async function startTicket(){
+  const btn=document.getElementById('btnB');
+  btn.disabled=true; btn.innerHTML='<span class="spin"></span>Creating ticket...';
+  try{
+    const r = await fetch(API+'/auth/tickets',{method:'POST'});
+    const d = await r.json();
+    if(!r.ok){ show('outB','❌ '+(d.detail||d).slice(0,300),true); btn.disabled=false; btn.innerHTML='🖥️ Start managed login'; return; }
+    ticketId = d.ticket_id;
+    let html = `<b>✅ Ticket created: <code>${ticketId}</code></b>
+      <div style="margin-top:10px"><span class="spin"></span> Waiting for the hosted browser...</div>`;
+    if(d.browser_url){ html += `<div class="hint">Browser: <a href="${d.browser_url}" target="_blank">${d.browser_url}</a></div>`; }
+    show('outB', html);
+    pollTimer = setInterval(poll, 5000);
+  }catch(e){ show('outB','❌ Network: '+e.message,true); }
+  btn.disabled=false; btn.innerHTML='🖥️ Start managed login';
+}
+async function poll(){
+  if(!ticketId) return;
+  try{
+    const r = await fetch(API+'/auth/tickets/'+ticketId);
+    const d = await r.json();
+    if(d.status==='pending' || d.status==='open'){
+      let h = `<b>Ticket: <code>${ticketId}</code></b>
+        <div style="margin-top:10px"><span class="spin"></span> Status: ${d.status.toUpperCase()}</div>`;
+      if(d.browser_url){
+        h += `<div class="hint">🖥️ 7ell had l-link f navigateur:
+          <br><a href="${d.browser_url}" target="_blank">${d.browser_url}</a><br>
+          password: <code>${d.browser_password||'Brain2026'}</code></div>`;
+      }
+      show('outB', h);
+    } else if(d.status==='done'){
+      clearInterval(pollTimer);
+      show('outB','<b>✅ Login done!</b><br>API key dyalk:'+keyCard(d.api_key));
+    } else if(d.status==='failed'){
+      clearInterval(pollTimer);
+      show('outB','❌ Ticket failed. Jerrb 3awd.',true);
+    }
+  }catch(e){ /* transient */ }
+}
+</script>
+</body>
+</html>

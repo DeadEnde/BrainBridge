@@ -11,3 +11,7 @@ cookies*.json
 .env
 .env.*
 bin/
+
+# per-user session states (secrets)
+data/
+users.json
