@@ -184,15 +184,27 @@ def _session_ok(ctx: dict) -> tuple[bool, str]:
 
 
 def _require_session(ctx: dict) -> None:
+    """Session must be valid; if not, try ONE automatic token rotation
+    (auth refresh asks Google for fresh `__Secure-1PSIDTS`) before failing."""
     ok, detail = _session_ok(ctx)
     if ok:
         return
+    try:
+        _run(["auth", "refresh"], storage=_storage_for(ctx), timeout=120)
+    except Exception as e:  # noqa: BLE001
+        print(f"[bridge] auto-refresh failed: {e}", file=sys.stderr)
+    ok2, detail2 = _session_ok(ctx)
+    if ok2:
+        return
     raise HTTPException(
         401,
-        "NotebookLM session expired. Unlock it: POST /auth/register with a fresh "
-        "Cookie-Editor JSON export (notebooklm.google.com + accounts.google.com), "
-        "then POST /auth/refresh. Detail: " + detail[:300],
+        "NotebookLM session expired and auto-refresh did not recover it. "
+        "Re-authenticate: POST /auth/register with a fresh Cookie-Editor export, "
+        "or via managed login (POST /auth/tickets). Detail: " + detail2[:300],
     )
+
+
+_ensure_session = _require_session  # alias (same auto-refresh behaviour)
 
 
 def _resolve_brain(target: str | None) -> dict[str, str]:
@@ -447,22 +459,37 @@ def auth_register(req: RegisterIn):
     elif req.state:
         data = json.dumps(req.state).encode()
     elif req.cookies:
+        cookies = req.cookies if isinstance(req.cookies, list) else req.cookies.get("cookies", req.cookies)
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-            json.dump(req.cookies, f)
+            json.dump(cookies, f)
             tmp_cookies = f.name
         storage = Path(tempfile.mktemp(prefix="bb_reg_", suffix=".json"))
         storage.parent.mkdir(parents=True, exist_ok=True)
         out = _run(["auth", "import-cookies", tmp_cookies], storage=storage, timeout=180)
         Path(tmp_cookies).unlink(missing_ok=True)
-        if "__Secure-1PSIDTS" in out and "Missing required cookies" in out:
-            raise HTTPException(
-                400,
-                "The export has no __Secure-1PSIDTS (Google rotates it per browser). "
-                "Open notebook.google.com while logged in, then export again — or use "
-                "the managed login (POST /auth/tickets). Detail: " + out[:300],
-            )
+        # If the export lacks __Secure-1PSIDTS (Cookie-Editor can't read HttpOnly
+        # after Chrome's App-Bound Encryption), the browser worker can MINT it
+        # from SID: put the cookies in the pending queue and return 202.
+        if "Missing required cookies" in out:
+            pid = secrets.token_hex(8)
+            store.put_pending({
+                "pending_id": pid,
+                "cookies": cookies,
+                "label": (req.label or "").strip()[:80] or "user",
+                "status": "wait",
+                "created": int(datetime.now(timezone.utc).timestamp()),
+            })
+            return {
+                "ok": True,
+                "pending_id": pid,
+                "status": "mint_required",
+                "tip": ("Your export lacks __Secure-1PSIDTS (Google rotates it per "
+                        "browser). A browser worker will mint fresh tokens from your "
+                        "SID automatically — poll GET /auth/pending/{pid} for the key."),
+            }
         valid, detail = _validate_state(storage)
         if not valid:
+            storage.unlink(missing_ok=True)
             raise HTTPException(401, "Import did not produce a valid session. " + (out + " " + detail)[:400])
         data = storage.read_bytes()
         storage.unlink(missing_ok=True)
@@ -679,6 +706,134 @@ def ticket_get(ticket_id: str):
 
 
 # ---------------------------------------------------------------------------
+# MULTI-USER: cookie-mint queue
+@app.get("/auth/pending/next")
+def pending_next(authorization: str | None = Header(default=None)):
+    """Owner/worker: pick the oldest waiting mint request."""
+    ctx = _authorize(authorization)
+    if ctx.get("user") is not None:
+        raise HTTPException(403, "Owner only")
+    store = get_store()
+    waiting = [r for r in store.list_pending() if r.get("status") in ("wait", "minting")]
+    waiting.sort(key=lambda r: r.get("created", 0))
+    if not waiting:
+        return {"pending_id": None}
+    r = waiting[0]
+    r["status"] = "minting"
+    store.put_pending(r)
+    return {"pending_id": r["pending_id"], "label": r.get("label", ""),
+            "cookies": r.get("cookies", [])}
+
+@app.get("/auth/pending/{pending_id}")
+def pending_get(pending_id: str):
+    """Public: poll your mint request. When status=done, 'api_key' is YOUR key."""
+    rec = get_store().get_pending(pending_id)
+    if not rec:
+        raise HTTPException(404, "no such pending request")
+    return {"pending_id": pending_id, "status": rec.get("status"),
+            "api_key": rec.get("api_key") if rec.get("status") == "done" else None}
+# ---------------------------------------------------------------------------
+
+
+
+
+@app.post("/auth/pending/{pending_id}/mint")
+def pending_mint(pending_id: str, req: CollectIn, authorization: str | None = Header(default=None)):
+    """Owner/worker: upload the state AFTER a browser minted fresh tokens from SID."""
+    ctx = _authorize(authorization)
+    if ctx.get("user") is not None:
+        raise HTTPException(403, "Owner only")
+    store = get_store()
+    r = store.get_pending(pending_id)
+    if not r:
+        raise HTTPException(404, "no such pending request")
+    try:
+        data = _decode_state(req.state_b64)
+    except Exception as e:
+        raise HTTPException(400, f"state_b64 invalid: {e}")
+    storage = Path(tempfile.mktemp(prefix="bb_mint_", suffix=".json"))
+    storage.write_bytes(data)
+    valid, detail = _validate_state(storage)
+    if not valid:
+        storage.unlink(missing_ok=True)
+        raise HTTPException(401, "Minted session is not valid. Detail: " + detail[:300])
+    key = secrets.token_urlsafe(24)
+    store.put_user({
+        "key": key,
+        "label": (req.label or r.get("label") or "").strip()[:80] or "user",
+        "state_b64": base64.b64encode(data).decode(),
+        "created": int(datetime.now(timezone.utc).timestamp()),
+        "updated": int(datetime.now(timezone.utc).timestamp()),
+        "note": "minted",
+    })
+    r["status"] = "done"
+    r["api_key"] = key
+    r["done"] = int(datetime.now(timezone.utc).timestamp())
+    store.put_pending(r)
+    storage.unlink(missing_ok=True)
+    return {"ok": True, "status": "done", "api_key": key}
+
+
+@app.post("/auth/pending/{pending_id}/failed")
+def pending_failed(pending_id: str, authorization: str | None = Header(default=None)):
+    """Owner/worker: Google rejected the mint (SID-only no longer enough)."""
+    ctx = _authorize(authorization)
+    if ctx.get("user") is not None:
+        raise HTTPException(403, "Owner only")
+    store = get_store()
+    r = store.get_pending(pending_id)
+    if not r:
+        raise HTTPException(404, "no such pending request")
+    r["status"] = "failed"
+    r["failed"] = int(datetime.now(timezone.utc).timestamp())
+    store.put_pending(r)
+    return {"ok": True, "status": "failed"}
+
+
+# ---------------------------------------------------------------------------
+# MULTI-USER: batch token refresh (guardian / cron)
+# ---------------------------------------------------------------------------
+def _refresh_user(u: dict) -> bool:
+    """Refresh one user's session state on disk with Google (rotates 1PSIDTS)."""
+    store = get_store()
+    try:
+        storage = Path(tempfile.mktemp(prefix="bb_ref_", suffix=".json"))
+        storage.write_bytes(base64.b64decode(u.get("state_b64", "")))
+        _run(["auth", "refresh"], storage=storage, timeout=120)
+        valid, _ = _validate_state(storage)
+        if valid:
+            u["state_b64"] = base64.b64encode(storage.read_bytes()).decode()
+            u["updated"] = int(datetime.now(timezone.utc).timestamp())
+            store.put_user(u)
+            storage.unlink(missing_ok=True)
+            return True
+        storage.unlink(missing_ok=True)
+        return False
+    except Exception:  # noqa: BLE001
+        return False
+
+
+@app.post("/auth/refresh-all")
+def refresh_all(limit: int = 20, offset: int = 0,
+                authorization: str | None = Header(default=None)):
+    """Owner: refresh user sessions in batches (guardian calls this every X min)."""
+    ctx = _authorize(authorization)
+    if ctx.get("user") is not None:
+        raise HTTPException(403, "Owner only")
+    store = get_store()
+    users = sorted(store.list_users(), key=lambda u: u.get("created", 0))
+    total = len(users)
+    window = users[offset:offset + max(1, min(limit, 50))]
+    ok = 0
+    for u in window:
+        if _refresh_user(u):
+            ok += 1
+    next_offset = offset + len(window) if offset + len(window) < total else None
+    return {"ok": ok, "fail": len(window) - ok, "total": total,
+            "scanned": len(window), "next_offset": next_offset}
+
+
+# ---------------------------------------------------------------------------
 # OWNER: user administration
 # ---------------------------------------------------------------------------
 @app.get("/users")
@@ -734,20 +889,9 @@ def cron_keepalive(request: Request, authorization: str | None = Header(default=
     except Exception as e:  # noqa: BLE001
         return {**result, "error": f"store: {e}"}
     for u in users[:40]:
-        try:
-            storage = Path(tempfile.mktemp(prefix="bb_kp_", suffix=".json"))
-            storage.write_bytes(base64.b64decode(u.get("state_b64", "")))
-            out = _run(["auth", "refresh"], storage=storage, timeout=120)
-            valid, _ = _validate_state(storage)
-            if valid:
-                u["state_b64"] = base64.b64encode(storage.read_bytes()).decode()
-                u["updated"] = int(datetime.now(timezone.utc).timestamp())
-                store.put_user(u)
-                result["users"]["ok"] += 1
-            else:
-                result["users"]["fail"] += 1
-            storage.unlink(missing_ok=True)
-        except Exception:  # noqa: BLE001
+        if _refresh_user(u):
+            result["users"]["ok"] += 1
+        else:
             result["users"]["fail"] += 1
     result["users"]["skipped"] = max(0, len(users) - 40)
     result["total_users"] = len(users)

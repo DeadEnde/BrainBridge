@@ -127,6 +127,39 @@ class FileStore:
         return False
 
 
+
+    # pending cookie-mint requests (same JSON shape, different folder)
+    def get_pending(self, pid: str) -> dict | None:
+        p = self.tdir / f"mint_{pid}.json"
+        if p.exists():
+            try:
+                return json.loads(p.read_text())
+            except Exception:
+                return None
+        return None
+
+    def put_pending(self, rec: dict) -> None:
+        (self.tdir / f"mint_{rec['pending_id']}.json").write_text(json.dumps(rec))
+
+    def list_pending(self, status: str | None = None) -> list[dict]:
+        out = []
+        for p in self.tdir.glob("mint_*.json"):
+            try:
+                rec = json.loads(p.read_text())
+            except Exception:
+                continue
+            if status and rec.get("status") != status:
+                continue
+            out.append(rec)
+        return out
+
+    def delete_pending(self, pid: str) -> bool:
+        p = self.tdir / f"mint_{pid}.json"
+        if p.exists():
+            p.unlink()
+            return True
+        return False
+
 # --------------------------------------------------------------------------- Upstash KV (REST)
 class KVStore:
     name = "kv"
@@ -209,6 +242,27 @@ class KVStore:
         self._del(f"bb:ticket:{tid}")
         return True
 
+
+
+    def get_pending(self, pid: str) -> dict | None:
+        return self._get_json(f"bb:pending:{pid}")
+
+    def put_pending(self, rec: dict) -> None:
+        self._set(f"bb:pending:{rec['pending_id']}", json.dumps(rec))
+
+    def list_pending(self, status: str | None = None) -> list[dict]:
+        out = []
+        for k in self._keys("bb:pending:*"):
+            rec = self._get_json(k)
+            if rec and (status is None or rec.get("status") == status):
+                out.append(rec)
+        return out
+
+    def delete_pending(self, pid: str) -> bool:
+        if self._get(f"bb:pending:{pid}") is None:
+            return False
+        self._del(f"bb:pending:{pid}")
+        return True
 
 # --------------------------------------------------------------------------- Vercel Blob
 class BlobStore:
@@ -301,6 +355,42 @@ class BlobStore:
         vercel_blob.delete(b["url"], timeout=15)
         return True
 
+
+
+    def get_pending(self, pid: str) -> dict | None:
+        b = self._find(f"pending/{pid}.json")
+        if not b:
+            return None
+        try:
+            return json.loads(self._fetch(b["url"]))
+        except Exception:
+            return None
+
+    def put_pending(self, rec: dict) -> None:
+        vercel_blob.put(f"pending/{rec['pending_id']}.json", json.dumps(rec).encode(), timeout=15)
+
+    def list_pending(self, status: str | None = None) -> list[dict]:
+        out = []
+        try:
+            d = vercel_blob.list({"prefix": "pending/", "limit": 1000}, timeout=15)
+        except Exception:
+            d = {}
+        for b in d.get("blobs", []):
+            try:
+                rec = json.loads(self._fetch(b["url"]))
+            except Exception:
+                continue
+            if status and rec.get("status") != status:
+                continue
+            out.append(rec)
+        return out
+
+    def delete_pending(self, pid: str) -> bool:
+        b = self._find(f"pending/{pid}.json")
+        if not b:
+            return False
+        vercel_blob.delete(b["url"], timeout=15)
+        return True
 
 # --------------------------------------------------------------------------- factory
 _store: Any = None
