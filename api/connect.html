@@ -45,6 +45,11 @@
 <div class="wrap">
   <h1>🧠 BrainBridge — Connect</h1>
   <p class="sub">Kola user kay-connecti <b>session dyalo</b> → kayakhod <b>API key privée</b> → y-3tiha l-ay AI model. L-session tbqa 7ayya (keepalive automatique).</p>
+  <div id="sysbar" style="display:flex;gap:8px;flex-wrap:wrap;margin:-10px 0 22px">
+    <span id="chipWorker" class="pill" style="padding:5px 12px">⏳ popup worker…</span>
+    <span id="chipEnc" class="pill" style="padding:5px 12px">🔐 chiffrement…</span>
+    <span id="chipStore" class="pill" style="padding:5px 12px">storage…</span>
+  </div>
 
   <div class="tabs">
     <div class="tab on" id="tabA" onclick="pick('a')">📋 Paste export (Cookie-Editor)</div>
@@ -75,11 +80,33 @@
     </div>
     <button id="btnB" onclick="startTicket()">🖥️ Start managed login</button>
     <div class="out" id="outB"></div>
+
+  <div class="panel on" id="panelSec" style="margin-top:22px;background:rgba(34,211,153,.05);border-color:rgba(34,211,153,.2)">
+    <b style="color:#34d399">🔐 Kifach ha l-system secure?</b>
+    <div class="steps" style="margin-top:10px">
+      • <b>Machi export wala paste:</b> ma 7tajtch t-copi cookies — le user kaydkhel ghir f l-popup dyal Google.<br>
+      • <b>L-password dyalk kaymchi direct l-Google</b> — BrainBridge ma kaychoufch l-password, ghir l-session tokens li Google y-3tihom l-browser.<br>
+      • <b>L-tokens m-chifrés f storage</b> (AES-256) — 7ta ila t-7yaq l-DB ma t-9ra walou (<span id="encNote">…</span>).<br>
+      • <b>Kol user 3ndo session + API key dyalo</b> — l-key dyalk ma t9derch tchouf les brains dyal user akhor.<br>
+      • <b>Ma kaynch login persistence bla consent</b> — kol key t9der t-t-revoke mn l-3nd l-owner f ay waqt.
+    </div>
   </div>
 </div>
 
 <script>
-const API = document.body.dataset.api || "";
+let API = document.body.dataset.api || "";
+async function refreshSys(){
+  try{
+    const r = await fetch(API+'/system/info');
+    const d = await r.json();
+    document.getElementById('chipWorker').textContent = d.worker_online ? '🟢 popup worker online' : '🔴 popup worker offline';
+    document.getElementById('chipWorker').style.background = d.worker_online ? 'rgba(52,211,153,.18)' : 'rgba(248,113,113,.15)';
+    document.getElementById('chipWorker').style.color = d.worker_online ? '#34d399' : '#f87171';
+    document.getElementById('chipEnc').textContent = d.encryption === 'on' ? '🔐 tokens chiffrés (AES-256)' : '🔓 chiffrement: OFF (set BRAINBRIDGE_SECRET)';
+    document.getElementById('chipEnc').style.color = d.encryption === 'on' ? '#34d399' : '#fbbf24';
+    document.getElementById('chipStore').textContent = '💾 ' + d.store;
+  }catch(e){}
+}refreshSys(); setInterval(refreshSys, 20000);
 function pick(t){
   document.getElementById('tabA').classList.toggle('on', t==='a');
   document.getElementById('tabB').classList.toggle('on', t==='b');

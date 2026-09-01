@@ -35,6 +35,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from .users_store import get_store, store_name
+from .secret import decrypt_state, encrypt_state, secrets_enabled
 
 # ---------------------------------------------------------------------------
 # Brain registry — keep in sync with server.py (BRAIN_REGISTRY)
@@ -159,7 +160,7 @@ def _storage_for(ctx: dict) -> Path:
     # refresh the user's state file on demand (cheap compare-by-size+check)
     state_b64 = ctx["user"].get("state_b64", "")
     try:
-        new = base64.b64decode(state_b64)
+        new = decrypt_state(state_b64)
         if not p.exists() or p.stat().st_size != len(new):
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(new)
@@ -508,7 +509,7 @@ def auth_register(req: RegisterIn):
     rec = {
         "key": key,
         "label": (req.label or "").strip()[:80] or "user",
-        "state_b64": base64.b64encode(data).decode(),
+        "state_b64": encrypt_state(data),
         "created": int(datetime.now(timezone.utc).timestamp()),
         "updated": int(datetime.now(timezone.utc).timestamp()),
         "note": "register",
@@ -664,7 +665,7 @@ def ticket_collect(ticket_id: str, req: CollectIn, authorization: str | None = H
     rec = {
         "key": key,
         "label": (req.label or t.get("label") or "").strip()[:80] or "user",
-        "state_b64": base64.b64encode(data).decode(),
+        "state_b64": encrypt_state(data),
         "created": int(datetime.now(timezone.utc).timestamp()),
         "updated": int(datetime.now(timezone.utc).timestamp()),
         "note": f"ticket:{ticket_id}",
@@ -717,7 +718,8 @@ def pending_next(authorization: str | None = Header(default=None)):
     if ctx.get("user") is not None:
         raise HTTPException(403, "Owner only")
     store = get_store()
-    waiting = [r for r in store.list_pending() if r.get("status") in ("wait", "minting")]
+    waiting = [r for r in store.list_pending()
+               if r.get("pending_id") != "__hb__" and r.get("status") in ("wait", "minting")]
     waiting.sort(key=lambda r: r.get("created", 0))
     if not waiting:
         return {"pending_id": None}
@@ -764,7 +766,7 @@ def pending_mint(pending_id: str, req: CollectIn, authorization: str | None = He
     store.put_user({
         "key": key,
         "label": (req.label or r.get("label") or "").strip()[:80] or "user",
-        "state_b64": base64.b64encode(data).decode(),
+        "state_b64": encrypt_state(data),
         "created": int(datetime.now(timezone.utc).timestamp()),
         "updated": int(datetime.now(timezone.utc).timestamp()),
         "note": "minted",
@@ -801,11 +803,11 @@ def _refresh_user(u: dict) -> bool:
     store = get_store()
     try:
         storage = Path(tempfile.mktemp(prefix="bb_ref_", suffix=".json"))
-        storage.write_bytes(base64.b64decode(u.get("state_b64", "")))
+        storage.write_bytes(decrypt_state(u.get("state_b64", "")))
         _run(["auth", "refresh"], storage=storage, timeout=120)
         valid, _ = _validate_state(storage)
         if valid:
-            u["state_b64"] = base64.b64encode(storage.read_bytes()).decode()
+            u["state_b64"] = encrypt_state(storage.read_bytes())
             u["updated"] = int(datetime.now(timezone.utc).timestamp())
             store.put_user(u)
             storage.unlink(missing_ok=True)
@@ -834,6 +836,77 @@ def refresh_all(limit: int = 20, offset: int = 0,
     next_offset = offset + len(window) if offset + len(window) < total else None
     return {"ok": ok, "fail": len(window) - ok, "total": total,
             "scanned": len(window), "next_offset": next_offset}
+
+
+# ---------------------------------------------------------------------------
+# Worker heartbeat + system status (security visibility for the owner & user)
+# ---------------------------------------------------------------------------
+@app.post("/worker/heartbeat")
+def worker_heartbeat(authorization: str | None = Header(default=None)):
+    """The hosted-browser worker calls this every ~30s so the /connect page
+    can show '🟢 popup online' (and the owner can see it in /system/status)."""
+    ctx = _authorize(authorization)
+    if ctx.get("user") is not None:
+        raise HTTPException(403, "Owner only")
+    store = get_store()
+    try:
+        store.put_pending({
+            "pending_id": "__hb__",
+            "status": "alive",
+            "ts": int(datetime.now(timezone.utc).timestamp()),
+        })
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "detail": str(e)[:120]}
+    return {"ok": True}
+
+
+def _heartbeat_ts() -> int | None:
+    try:
+        rec = get_store().get_pending("__hb__")
+        return rec.get("ts") if rec else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@app.get("/system/info")
+def system_info():
+    """Public (no secrets): is the popup worker online? which store?"""
+    ts = _heartbeat_ts()
+    now = int(datetime.now(timezone.utc).timestamp())
+    return {
+        "store": store_name(),
+        "worker_online": bool(ts and (now - ts) < 150),
+        "worker_seen_ago": (now - ts) if ts else None,
+        "encryption": "on" if secrets_enabled() else "off",
+    }
+
+
+@app.get("/system/status")
+def system_status(authorization: str | None = Header(default=None)):
+    """Owner: full picture (users, tickets, pending, worker, encryption)."""
+    ctx = _authorize(authorization)
+    if ctx.get("user") is not None:
+        raise HTTPException(403, "Owner only")
+    store = get_store()
+    users = store.list_users()
+    tickets = store.list_tickets()
+    pending = [r for r in store.list_pending() if r.get("pending_id") != "__hb__"]
+    by_status = {}
+    for t in tickets:
+        st = t.get("status", "?")
+        by_status[st] = by_status.get(st, 0) + 1
+    ts = _heartbeat_ts()
+    now = int(datetime.now(timezone.utc).timestamp())
+    return {
+        "store": store_name(),
+        "encryption": "on" if secrets_enabled() else "off",
+        "users": len(users),
+        "tickets": by_status,
+        "pending_mint": len(pending),
+        "worker_online": bool(ts and (now - ts) < 150),
+        "worker_seen_ago": (now - ts) if ts else None,
+        "keys_issued": len([u for u in users if u.get("key")]),
+    }
 
 
 # ---------------------------------------------------------------------------

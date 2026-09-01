@@ -237,7 +237,7 @@ def mint_cookies(cookies: list[dict]) -> tuple[bool, str]:
     from playwright.sync_api import sync_playwright
     state = build_state(cookies)
     with sync_playwright() as p:
-        b = p.chromium.launch(headless=True)
+        b = p.chromium.launch(headless=False, args=["--no-sandbox"])
         ctx = b.new_context(storage_state=state)
         page = ctx.new_page()
         page.goto("https://accounts.google.com/", wait_until="domcontentloaded", timeout=60000)
@@ -274,12 +274,22 @@ async def handle_mint(pid: str, label: str, cookies: list[dict]) -> None:
 
 
 # --------------------------------------------------------------------------- main
+def heartbeat_loop() -> None:
+    while True:
+        try:
+            post("/worker/heartbeat", timeout=30)
+        except Exception as e:  # noqa: BLE001
+            log(f"heartbeat err: {e}")
+        time.sleep(30)
+
+
 def main() -> None:
     if not KEY:
         log("BRAINBRIDGE_KEY missing — exit")
         return
     import threading
     threading.Thread(target=guardian_loop, daemon=True).start()
+    threading.Thread(target=heartbeat_loop, daemon=True).start()
     ensure_display()
     log(f"token factory up | jobs: guardian({INTERVAL}min) + popup + mint")
     while True:
