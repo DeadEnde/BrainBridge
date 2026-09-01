@@ -889,7 +889,9 @@ def system_status(authorization: str | None = Header(default=None)):
         raise HTTPException(403, "Owner only")
     store = get_store()
     users = store.list_users()
-    tickets = store.list_tickets()
+    tickets = [t for t in store.list_tickets()
+               if not str(t.get("ticket_id", "")).startswith(("mint_", "__hb__"))
+               and t.get("ticket_id") != "__hb__"]
     pending = [r for r in store.list_pending() if r.get("pending_id") != "__hb__"]
     by_status = {}
     for t in tickets:
