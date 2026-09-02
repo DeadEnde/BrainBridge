@@ -36,6 +36,8 @@ from pydantic import BaseModel
 
 from .users_store import get_store, store_name
 from .secret import decrypt_state, encrypt_state, secrets_enabled
+from . import oauth_flow
+from . import tasks_store
 
 # ---------------------------------------------------------------------------
 # Brain registry — keep in sync with server.py (BRAIN_REGISTRY)
@@ -839,6 +841,181 @@ def refresh_all(limit: int = 20, offset: int = 0,
 
 
 # ---------------------------------------------------------------------------
+# BrainBridge Notes — official Google OAuth (Tasks) flow
+# ---------------------------------------------------------------------------
+def _tasks_token(ctx: dict) -> str:
+    """For a tasks-provider user: (re)issue an access token from the refresh token."""
+    u = ctx.get("user")
+    if not u or u.get("provider") != "tasks":
+        raise HTTPException(400, "This key is not a Notes (Google Tasks) user.")
+    try:
+        rt = decrypt_state(u["refresh_token"])
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(401, f"Cannot decrypt your refresh token: {e}")
+    return oauth_flow.refresh_access_token(rt)
+
+
+@app.post("/auth/oauth/start")
+def oauth_start(label: str | None = None):
+    """Public: returns the Google consent URL ('BrainBridge wants access to
+    your Google Tasks'). The client redirects the user's browser there."""
+    state = secrets.token_urlsafe(8)
+    return {"auth_url": oauth_flow.auth_url(state), "state": state}
+
+
+@app.get("/oauth2callback", include_in_schema=False)
+def oauth2callback(code: str | None = None, error: str | None = None,
+                   state: str | None = None):
+    """Public: Google redirects here after 'Continue'. We exchange the code,
+    store the refresh token (encrypted), and hand out the user's API key."""
+    if error:
+        return HTMLResponse(_html_msg("❌ Google denied access", f"{error} — You can close this tab."), status_code=400)
+    if not code:
+        return HTMLResponse(_html_msg("❌ Missing code", "No authorization code received."), status_code=400)
+    try:
+        tokens = oauth_flow.exchange_code(code)
+    except Exception as e:  # noqa: BLE001
+        return HTMLResponse(_html_msg("❌ Could not exchange the code", str(e)[:300]), status_code=400)
+    try:
+        email = oauth_flow.user_email(tokens["access_token"])
+    except Exception:  # noqa: BLE001
+        email = ""
+    # one user per Google account (update refresh token instead of duplicating)
+    store = get_store()
+    existing = None
+    for u in store.list_users():
+        if u.get("provider") == "tasks" and u.get("email") == email:
+            existing = u
+            break
+    if existing:
+        key = existing["key"]
+        existing["refresh_token"] = encrypt_state(tokens["refresh_token"].encode())
+        existing["updated"] = int(datetime.now(timezone.utc).timestamp())
+        store.put_user(existing)
+        label = existing.get("label") or email or "user"
+    else:
+        key = secrets.token_urlsafe(24)
+        label = email or "user"
+        store.put_user({
+            "key": key, "label": label, "email": email, "provider": "tasks",
+            "refresh_token": encrypt_state(tokens["refresh_token"].encode()),
+            "created": int(datetime.now(timezone.utc).timestamp()),
+            "updated": int(datetime.now(timezone.utc).timestamp()),
+            "note": "oauth-tasks",
+        })
+    return HTMLResponse(
+        _html_msg(
+            "✅ Connected!",
+            f"<b>{email or 'Your account'}</b> is linked to BrainBridge.<br>"
+            f"Your API key:<br><code style='font-size:14px;word-break:break-all'>{key}</code><br><br>"
+            f"Send it as <code>Authorization: Bearer {key[:8]}…</code>.<br>"
+            f"<small>Revoke anytime at myaccount.google.com/permissions. "
+            f"This key works for /memory/notes, /memory/note, /memory/notes/context.</small>",
+        )
+    )
+
+
+def _html_msg(title: str, body: str) -> str:
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title>
+<style>body{{font-family:system-ui;background:#0a0c14;color:#eef0f8;display:grid;place-items:center;min-height:100vh;margin:0}}
+.card{{max-width:520px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);border-radius:18px;padding:34px;line-height:1.7}}
+h1{{font-size:1.4rem}}code{{background:#161a2c;padding:8px 12px;border-radius:10px;display:inline-block;margin:8px 0}}
+small{{color:#9aa7d8}}</style></head><body><div class="card"><h1>{title}</h1><p>{body}</p></div></body></html>"""
+
+
+@app.post("/auth/oauth/refresh")
+def oauth_refresh(authorization: str | None = Header(default=None)):
+    """Any key: re-issue the Tasks access token (cheap; used by the guardian)."""
+    ctx = _authorize(authorization)
+    token = _tasks_token(ctx)
+    return {"ok": True, "access_token_len": len(token)}
+
+
+@app.get("/memory/notes")
+def notes_list(limit: int = 300, keyword: str | None = None,
+               authorization: str | None = Header(default=None)):
+    """BrainBridge Notes: list your memory entries (Google Tasks)."""
+    ctx = _authorize(authorization)
+    token = _tasks_token(ctx)
+    notes = tasks_store.search_notes(token, keyword, limit=limit) if keyword else tasks_store.list_notes(token, limit=limit)
+    return {"brain": "google-tasks", "notes": notes, "count": len(notes)}
+
+
+@app.post("/memory/note")
+def note_save(req: SaveIn, authorization: str | None = Header(default=None)):
+    """BrainBridge Notes: save a memory entry (title + content)."""
+    ctx = _authorize(authorization)
+    token = _tasks_token(ctx)
+    note = tasks_store.create_note(token, req.title, req.content)
+    return {"brain": "google-tasks", "note": note}
+
+
+@app.get("/memory/note/{note_id}")
+def note_get(note_id: str, authorization: str | None = Header(default=None)):
+    ctx = _authorize(authorization)
+    token = _tasks_token(ctx)
+    note = tasks_store.get_note(token, note_id)
+    if note is None:
+        raise HTTPException(404, "no such note")
+    return {"brain": "google-tasks", "note": note}
+
+
+@app.delete("/memory/note/{note_id}")
+def note_delete(note_id: str, authorization: str | None = Header(default=None)):
+    ctx = _authorize(authorization)
+    token = _tasks_token(ctx)
+    ok = tasks_store.delete_note(token, note_id)
+    return {"ok": ok, "deleted": note_id if ok else None}
+
+
+@app.get("/memory/notes/context")
+def notes_context(limit: int = 8, authorization: str | None = Header(default=None)):
+    """BrainBridge Notes: 'what is already known' — ready for an AI prompt."""
+    ctx = _authorize(authorization)
+    token = _tasks_token(ctx)
+    notes = tasks_store.list_notes(token, limit=200)
+    context = tasks_store.render_context(notes, limit=limit)
+    return {"brain": "google-tasks", "context": context,
+            "note_count": len(notes),
+            "ai_prompt": ("You are answering from the user's BrainBridge memory "
+                          "(Google Tasks). Use the 'context' as authoritative "
+                          "background. If it does not answer the question, say so.")}
+
+
+@app.post("/ask/note")
+def note_ask(req: AskIn, authorization: str | None = Header(default=None)):
+    """BrainBridge Notes: answer a question from the memory.
+    With GEMINI_API_KEY set, a Gemini model answers; otherwise the raw context
+    is returned and the calling AI composes the answer."""
+    ctx = _authorize(authorization)
+    token = _tasks_token(ctx)
+    notes = tasks_store.list_notes(token, limit=200)
+    context = tasks_store.render_context(notes, limit=10)
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if gemini_key:
+        try:
+            system = ("You are BrainBridge, the user's permanent memory. "
+                      "Answer the question using ONLY the memory below; cite "
+                      "entry titles when you use them. If it is not in the "
+                      "memory, say that honestly.")
+            prompt = system + "\n\n--- MEMORY ---\n" + context + "\n\n--- QUESTION ---\n" + req.question
+            r = httpx.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                "gemini-2.0-flash:generateContent",
+                params={"key": gemini_key},
+                json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=120)
+            r.raise_for_status()
+            cands = r.json().get("candidates", [])
+            answer = cands[0]["content"]["parts"][0]["text"] if cands else "(empty)"
+            return {"brain": "google-tasks", "answer": answer, "model": "gemini-2.0-flash"}
+        except Exception as e:  # noqa: BLE001
+            return {"brain": "google-tasks", "answer": None,
+                    "context": context, "gemini_error": str(e)[:200]}
+    return {"brain": "google-tasks", "answer": None, "context": context,
+            "hint": "Set GEMINI_API_KEY on the server to enable automatic answers."}
+
+
+# ---------------------------------------------------------------------------
 # Worker heartbeat + system status (security visibility for the owner & user)
 # ---------------------------------------------------------------------------
 @app.post("/worker/heartbeat")
@@ -878,6 +1055,7 @@ def system_info():
         "worker_online": bool(ts and (now - ts) < 150),
         "worker_seen_ago": (now - ts) if ts else None,
         "encryption": "on" if secrets_enabled() else "off",
+        "oauth": "on" if os.environ.get("GOOGLE_CLIENT_ID", "").strip() else "off",
     }
 
 

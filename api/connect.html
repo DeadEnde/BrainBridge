@@ -49,11 +49,13 @@
     <span id="chipWorker" class="pill" style="padding:5px 12px">⏳ popup worker…</span>
     <span id="chipEnc" class="pill" style="padding:5px 12px">🔐 chiffrement…</span>
     <span id="chipStore" class="pill" style="padding:5px 12px">storage…</span>
+    <span id="chipOauth" class="pill" style="padding:5px 12px">google oauth…</span>
   </div>
 
   <div class="tabs">
     <div class="tab on" id="tabA" onclick="pick('a')">📋 Paste export (Cookie-Editor)</div>
     <div class="tab" id="tabB" onclick="pick('b')">🖥️ Managed login (hosted browser)</div>
+    <div class="tab" id="tabC" onclick="pick('c')">🔐 Sign in with Google</div>
   </div>
 
   <!-- Tab A: paste -->
@@ -90,6 +92,17 @@
       • <b>Kol user 3ndo session + API key dyalo</b> — l-key dyalk ma t9derch tchouf les brains dyal user akhor.<br>
       • <b>Ma kaynch login persistence bla consent</b> — kol key t9der t-t-revoke mn l-3nd l-owner f ay waqt.
     </div>
+  <!-- Tab C: official Google OAuth -->
+  <div class="panel" id="panelC">
+    <div class="steps">
+      <b>1.</b> Klek <b>Sign in with Google</b> — kay-7ell l-screen l-officiel dyal Google:<br>
+      &nbsp;&nbsp;<b>"BrainBridge wants access to your Google Tasks"</b>&nbsp;→&nbsp;klek <b>Continue</b>.<br>
+      <b>2.</b> Google kay-rje3 lik hna + kay-3tik <b>API key dyalk</b> (f l-page).<br>
+      <b>3.</b> Kol mémoire = note f <b>Google Tasks</b> (dossier "BrainBridge Memory") — t9der t-revokeh ay waqt mn <code>myaccount.google.com/permissions</code>.
+    </div>
+    <button id="btnC" onclick="startOAuth()">🔐 Sign in with Google</button>
+    <div class="hint" id="oauthHint"></div>
+    <div class="out" id="outC"></div>
   </div>
 </div>
 
@@ -105,13 +118,28 @@ async function refreshSys(){
     document.getElementById('chipEnc').textContent = d.encryption === 'on' ? '🔐 tokens chiffrés (AES-256)' : '🔓 chiffrement: OFF (set BRAINBRIDGE_SECRET)';
     document.getElementById('chipEnc').style.color = d.encryption === 'on' ? '#34d399' : '#fbbf24';
     document.getElementById('chipStore').textContent = '💾 ' + d.store;
+    document.getElementById('chipOauth').textContent = d.oauth === 'on' ? '🟢 Sign in with Google ready' : '⚪ Google OAuth: not configured';
+    document.getElementById('chipOauth').style.color = d.oauth === 'on' ? '#34d399' : '#8b93a7';
   }catch(e){}
 }refreshSys(); setInterval(refreshSys, 20000);
 function pick(t){
   document.getElementById('tabA').classList.toggle('on', t==='a');
   document.getElementById('tabB').classList.toggle('on', t==='b');
+  document.getElementById('tabC').classList.toggle('on', t==='c');
   document.getElementById('panelA').classList.toggle('on', t==='a');
   document.getElementById('panelB').classList.toggle('on', t==='b');
+  document.getElementById('panelC').classList.toggle('on', t==='c');
+  if(t==='c') refreshSys();
+}
+async function startOAuth(){
+  const btn = document.getElementById('btnC');
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Opening Google…';
+  try{
+    const r = await fetch(API+'/auth/oauth/start', {method:'POST'});
+    const d = await r.json();
+    if(!r.ok){ show('outC','❌ '+(d.detail||d).slice(0,300), true); btn.disabled=false; btn.innerHTML='🔐 Sign in with Google'; return; }
+    window.location.href = d.auth_url;   // -> real Google consent screen
+  }catch(e){ show('outC','❌ Network: '+e.message, true); btn.disabled=false; btn.innerHTML='🔐 Sign in with Google'; }
 }
 function show(id, html, err){
   const el = document.getElementById(id);
