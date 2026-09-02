@@ -25,6 +25,12 @@
   label{display:block;color:#9aa7d8;font-size:.8rem;margin:14px 0 6px}
   button{margin-top:16px;padding:13px 26px;border:0;border-radius:12px;font-weight:700;font-size:.92rem;cursor:pointer;
          background:linear-gradient(90deg,#8b5cf6,#ec4899);color:#fff}
+  a.google-btn{display:inline-block;margin-top:16px;padding:13px 26px;border:0;border-radius:12px;font-weight:700;
+         font-size:.92rem;cursor:pointer;text-decoration:none;color:#fff;
+         background:linear-gradient(90deg,#8b5cf6,#ec4899);transition:.15s}
+  a.google-btn:hover{transform:translateY(-1px);box-shadow:0 6px 24px rgba(139,92,246,.4)}
+  a.google-btn.off{opacity:.55;cursor:not-allowed}
+  .nw{font-size:.7rem;opacity:.75;font-weight:600;margin-left:4px}
   button:disabled{opacity:.5;cursor:wait}
   .out{margin-top:18px;background:rgba(34,211,153,.08);border:1px solid rgba(34,211,153,.35);border-radius:14px;
        padding:16px;display:none;font-size:.85rem;line-height:1.7}
@@ -45,6 +51,8 @@
 <div class="wrap">
   <h1>🧠 BrainBridge — Connect</h1>
   <p class="sub">Kola user kay-connecti <b>session dyalo</b> → kayakhod <b>API key privée</b> → y-3tiha l-ay AI model. L-session tbqa 7ayya (keepalive automatique).</p>
+  <a id="btnHero" class="google-btn" href="{{API_BASE}}/auth/oauth/start" target="_blank" rel="noopener" onclick="return oauthGate(event)">🔐 Sign in with Google<span class="nw">↗ new tab</span></a>
+  <div class="hint" id="heroHint" style="margin-top:8px"></div>
   <div id="sysbar" style="display:flex;gap:8px;flex-wrap:wrap;margin:-10px 0 22px">
     <span id="chipWorker" class="pill" style="padding:5px 12px">⏳ popup worker…</span>
     <span id="chipEnc" class="pill" style="padding:5px 12px">🔐 chiffrement…</span>
@@ -100,7 +108,7 @@
       <b>2.</b> Google kay-rje3 lik hna + kay-3tik <b>API key dyalk</b> (f l-page).<br>
       <b>3.</b> Kol mémoire = note f <b>Google Tasks</b> (dossier "BrainBridge Memory") — t9der t-revokeh ay waqt mn <code>myaccount.google.com/permissions</code>.
     </div>
-    <button id="btnC" onclick="startOAuth()">🔐 Sign in with Google</button>
+    <a id="btnC" class="google-btn" href="{{API_BASE}}/auth/oauth/start" target="_blank" rel="noopener" onclick="return oauthGate(event)">🔐 Sign in with Google<span class="nw">↗ new tab</span></a>
     <div class="hint" id="oauthHint"></div>
     <div class="out" id="outC"></div>
   </div>
@@ -112,6 +120,7 @@ async function refreshSys(){
   try{
     const r = await fetch(API+'/system/info');
     const d = await r.json();
+    SYSTEM = d;
     document.getElementById('chipWorker').textContent = d.worker_online ? '🟢 popup worker online' : '🔴 popup worker offline';
     document.getElementById('chipWorker').style.background = d.worker_online ? 'rgba(52,211,153,.18)' : 'rgba(248,113,113,.15)';
     document.getElementById('chipWorker').style.color = d.worker_online ? '#34d399' : '#f87171';
@@ -131,15 +140,26 @@ function pick(t){
   document.getElementById('panelC').classList.toggle('on', t==='c');
   if(t==='c') refreshSys();
 }
-async function startOAuth(){
-  const btn = document.getElementById('btnC');
-  btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Opening Google…';
-  try{
-    const r = await fetch(API+'/auth/oauth/start', {method:'POST'});
-    const d = await r.json();
-    if(!r.ok){ show('outC','❌ '+(d.detail||d).slice(0,300), true); btn.disabled=false; btn.innerHTML='🔐 Sign in with Google'; return; }
-    window.location.href = d.auth_url;   // -> real Google consent screen
-  }catch(e){ show('outC','❌ Network: '+e.message, true); btn.disabled=false; btn.innerHTML='🔐 Sign in with Google'; }
+let SYSTEM = null;   // last /system/info payload
+document.addEventListener('DOMContentLoaded', () => {
+  const base = API.replace(/\/$/, '');
+  document.getElementById('btnHero').href = base + '/auth/oauth/start';
+  document.getElementById('btnC').href = base + '/auth/oauth/start';
+});
+// Opens the REAL Google consent screen ("BrainBridge wants access to your
+// Google Tasks") in a NEW TAB. Blocked only if OAuth is not configured.
+async function oauthGate(ev){
+  try{ if(!SYSTEM) await refreshSys(); }catch(_){}
+  if(SYSTEM && SYSTEM.oauth !== 'on'){
+    ev.preventDefault();
+    const pc = document.getElementById('panelC');
+    if(pc && !pc.classList.contains('on')) pick('c');
+    if(document.getElementById('btnC')) document.getElementById('btnC').classList.add('off');
+    show('outC', '❌ Google OAuth mazal ma-configuré-sh f l-server. 3lik <b>GOOGLE_CLIENT_ID</b> + <b>GOOGLE_CLIENT_SECRET</b> f Vercel (Environment Variables) → Redeploy.', true);
+    return false;
+  }
+  document.getElementById('heroHint').textContent = '';
+  return true;   // native target="_blank" -> consent screen in the new tab
 }
 function show(id, html, err){
   const el = document.getElementById(id);

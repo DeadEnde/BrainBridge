@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
 from .users_store import get_store, store_name
@@ -855,12 +855,16 @@ def _tasks_token(ctx: dict) -> str:
     return oauth_flow.refresh_access_token(rt)
 
 
-@app.post("/auth/oauth/start")
-def oauth_start(label: str | None = None):
-    """Public: returns the Google consent URL ('BrainBridge wants access to
-    your Google Tasks'). The client redirects the user's browser there."""
+@app.api_route("/auth/oauth/start", methods=["GET", "POST"])
+def oauth_start(request: Request, label: str | None = None):
+    """Public: returns (POST) or redirects to (GET) the Google consent URL
+    ('BrainBridge wants access to your Google Tasks'). GET behaviour lets a
+    plain link / button open the consent screen in a new browser tab."""
     state = secrets.token_urlsafe(8)
-    return {"auth_url": oauth_flow.auth_url(state), "state": state}
+    url = oauth_flow.auth_url(state)
+    if request.method == "GET":
+        return RedirectResponse(url, status_code=302)
+    return {"auth_url": url, "state": state}
 
 
 @app.get("/oauth2callback", include_in_schema=False)
