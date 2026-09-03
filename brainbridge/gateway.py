@@ -1119,6 +1119,32 @@ def system_info():
     }
 
 
+@app.get("/system/check")
+def system_check():
+    """Public diagnostic: is the KV store actually writable/readable, how many
+    users exist, and the first chars of their keys (to match a pasted key)."""
+    store = get_store()
+    out: dict = {"store": store.name, "kv_roundtrip": None,
+                 "users_count": None, "user_key_prefixes": []}
+    if store.name == "kv":
+        import uuid as _uuid
+        test = f"bb:diag:{_uuid.uuid4().hex}"
+        try:
+            store._set(test, "ok")
+            ok = store._get(test) == "ok"
+            store._del(test)
+            out["kv_roundtrip"] = "ok" if ok else "FAIL(readback)"
+        except Exception as e:  # noqa: BLE001
+            out["kv_roundtrip"] = f"FAIL: {str(e)[:120]}"
+    try:
+        users = store.list_users()
+        out["users_count"] = len(users)
+        out["user_key_prefixes"] = sorted({u.get("key", "")[:6] for u in users})[:50]
+    except Exception as e:  # noqa: BLE001
+        out["users_list_error"] = str(e)[:120]
+    return out
+
+
 @app.get("/system/status")
 def system_status(authorization: str | None = Header(default=None)):
     """Owner: full picture (users, tickets, pending, worker, encryption)."""
