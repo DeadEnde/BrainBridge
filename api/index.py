@@ -64,4 +64,13 @@ def connect_page():
     return HTMLResponse("<h1>BrainBridge Connect</h1><p>POST /api/auth/register</p>")
 
 
+@app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
+def privacy_page():
+    """Privacy policy — required by Google OAuth verification."""
+    p = _P(__file__).parent / "privacy.html"
+    if p.exists():
+        return HTMLResponse(p.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>BrainBridge Privacy Policy</h1>")
+
+
 app.mount("/api", gateway_app)

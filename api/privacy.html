@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BrainBridge — Privacy Policy</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh;color:#eef0f8;
+       background:radial-gradient(1200px 700px at 20% 0%,#1e1b4b,transparent 55%),radial-gradient(1000px 600px at 90% 100%,#4c1d95,transparent 50%),#0a0c14}
+  .wrap{max-width:760px;margin:0 auto;padding:48px 20px 60px}
+  h1{font-size:1.6rem;margin-bottom:18px;background:linear-gradient(90deg,#a78bfa,#f472b6,#38bdf8);
+     -webkit-background-clip:text;background-clip:text;color:transparent}
+  h2{color:#c4b5fd;font-size:1.05rem;margin:22px 0 8px}
+  p,li{color:#cbd5f1;font-size:.9rem;line-height:1.75}
+  ul{padding-left:22px}
+  code{background:rgba(255,255,255,.08);padding:2px 7px;border-radius:7px;font-size:.78rem}
+  .card{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:22px;margin-top:14px}
+  .small{color:#8b93a7;font-size:.78rem;margin-top:26px}
+  .fr{font-size:.82rem;color:#9aa7d8}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🧠 BrainBridge — Privacy Policy</h1>
+  <p class="fr"><i>Français: BrainBridge accède uniquement à votre liste « BrainBridge Memory » dans Google Tasks
+  (que l'application crée) et à votre adresse e-mail, pour vous identifier. Aucune autre donnée n'est lue.</i></p>
+
+  <div class="card">
+    <h2>1. What we access (Google API scopes)</h2>
+    <ul>
+      <li><code>https://www.googleapis.com/auth/tasks</code> — to read, create and delete notes only in the
+        <b>“BrainBridge Memory”</b> task list that the app itself creates. We never touch your other task lists.</li>
+      <li><code>https://www.googleapis.com/auth/userinfo.email</code> + <code>openid</code> — to identify your account
+        and issue your personal API key.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>2. What we store</h2>
+    <ul>
+      <li>Your <b>Google OAuth refresh token</b> (encrypted at rest) — used to keep your memory synced.</li>
+      <li>Your <b>BrainBridge API key</b> — a random secret we generate for you.</li>
+      <li>Your email address — to link the key to your account.</li>
+    </ul>
+    <p>We never store your password. We never read your email, Drive, Calendar or other Google data.</p>
+  </div>
+
+  <div class="card">
+    <h2>3. How you control it</h2>
+    <ul>
+      <li>Revoke access any time at <code>myaccount.google.com/permissions</code> → BrainBridge → <b>Remove access</b>.
+        We can no longer reach your Tasks after that, and your refresh token becomes invalid.</li>
+      <li>Delete your notes by deleting the <b>BrainBridge Memory</b> list inside Google Tasks.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>4. Data usage</h2>
+    <ul>
+      <li>Your notes are used <b>only</b> to answer your own questions via the BrainBridge API.</li>
+      <li>Not shared, not sold, not used for advertising.</li>
+      <li>When you enable an AI answer (<code>GEMINI_API_KEY</code>), the note context is sent to the model provider
+        solely to produce your answer.</li>
+    </ul>
+  </div>
+
+  <p class="small">BrainBridge — auth brain interface · <a href="/connect" style="color:#a78bfa">← Back to connect</a></p>
+</div>
+</body>
+</html>
