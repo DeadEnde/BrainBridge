@@ -140,7 +140,16 @@ def _authorize(authorization: str | None) -> dict:
         token = authorization.split(" ", 1)[1].strip()
         if token == API_KEY:
             return {"user": None}
-        rec = get_store().get_user(token)
+        store = get_store()
+        rec = store.get_user(token)
+        if not rec:
+            # Keys are base64url and may end with '-'/'_' which people often
+            # drop when copying: accept the variants too.
+            for cand in (token + "-", token + "_", token[:-1] if token.endswith(("-", "_")) else token):
+                if cand != token and cand:
+                    rec = store.get_user(cand)
+                    if rec:
+                        break
         if rec:
             return {"user": rec}
         raise HTTPException(403, "Invalid key")
@@ -847,16 +856,45 @@ def refresh_all(limit: int = 20, offset: int = 0,
 # ---------------------------------------------------------------------------
 # BrainBridge Notes — official Google OAuth (Tasks) flow
 # ---------------------------------------------------------------------------
+def _refresh_and_rotate(u: dict) -> str:
+    """Refresh Google's access token for a tasks user and PERSIST the rotated
+    refresh token Google returns (Google invalidates the previous one right
+    away for unverified apps). Keeps the previous token as fallback."""
+    cands: list[tuple[str, str]] = []
+    try:
+        cands.append(("current", decrypt_state(u["refresh_token"]).decode()))
+    except Exception:  # noqa: BLE001
+        pass
+    if u.get("refresh_token_prev"):
+        try:
+            cands.append(("prev", decrypt_state(u["refresh_token_prev"]).decode()))
+        except Exception:  # noqa: BLE001
+            pass
+    last: Exception | None = None
+    for slot, tok in cands:
+        try:
+            at, new_rt = oauth_flow.refresh_access_token(tok)
+        except HTTPException as e:
+            last = e
+            continue
+        if new_rt:
+            if slot == "current":
+                u["refresh_token_prev"] = u["refresh_token"]
+            u["refresh_token"] = encrypt_state(new_rt.encode())
+            get_store().put_user(u)
+        return at
+    raise HTTPException(
+        401, f"Refresh token rejected (last error: {last})" if last
+        else "No refresh token stored for this user"
+    )
+
+
 def _tasks_token(ctx: dict) -> str:
     """For a tasks-provider user: (re)issue an access token from the refresh token."""
     u = ctx.get("user")
     if not u or u.get("provider") != "tasks":
         raise HTTPException(400, "This key is not a Notes (Google Tasks) user.")
-    try:
-        rt = decrypt_state(u["refresh_token"])
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(401, f"Cannot decrypt your refresh token: {e}")
-    return oauth_flow.refresh_access_token(rt)
+    return _refresh_and_rotate(u)
 
 
 def _sign_secret() -> bytes:
@@ -966,9 +1004,7 @@ def oauth2callback(code: str | None = None, error: str | None = None,
     # 'invalid_grant' right away instead of on the first /memory call).
     verify = None
     try:
-        oauth_flow.refresh_access_token(
-            decrypt_state(store.get_user(key)["refresh_token"]).decode()
-        )
+        _refresh_and_rotate(store.get_user(key))
     except HTTPException as e:
         verify = str(e.detail)[:200]
     if client_redirect:
@@ -1200,9 +1236,10 @@ def system_oauthdebug(authorization: str | None = Header(default=None)):
             out["users"].append(rec)
             continue
         try:
-            at = oauth_flow.refresh_access_token(rt)
+            at = _refresh_and_rotate(u)
             rec["refresh_ok"] = True
             rec["access_token_len"] = len(at)
+            rec["has_prev"] = bool(u.get("refresh_token_prev"))
         except HTTPException as e:
             rec["refresh_ok"] = False
             rec["refresh_err"] = str(e.detail)[:300]

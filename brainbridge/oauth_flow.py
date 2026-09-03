@@ -85,7 +85,13 @@ def exchange_code(code: str) -> dict:
     return d
 
 
-def refresh_access_token(refresh_token: str) -> str:
+def refresh_access_token(refresh_token: str) -> tuple[str, str | None]:
+    """-> (access_token, new_refresh_token_or_None).
+
+    Google ROTATES refresh tokens for unverified/testing apps: each refresh
+    returns a NEW refresh token and invalidates the old one. Callers MUST
+    persist the returned new refresh token (previous one dies immediately).
+    """
     cid, cs = _cfg()
     r = httpx.post(TOKEN_URL, data={
         "refresh_token": refresh_token,
@@ -95,7 +101,8 @@ def refresh_access_token(refresh_token: str) -> str:
     }, timeout=30)
     if r.status_code != 200:
         raise HTTPException(401, f"Refresh token rejected: {r.text[:200]}")
-    return r.json()["access_token"]
+    d = r.json()
+    return d["access_token"], d.get("refresh_token")
 
 
 def user_email(access_token: str) -> str:
