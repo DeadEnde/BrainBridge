@@ -962,13 +962,21 @@ def oauth2callback(code: str | None = None, error: str | None = None,
         })
         reused = False
     client_redirect = _unpack_redirect(state)
+    # Verify the freshly issued refresh token actually works (catches
+    # 'invalid_grant' right away instead of on the first /memory call).
+    verify = None
+    try:
+        oauth_flow.refresh_access_token(
+            decrypt_state(store.get_user(key)["refresh_token"]).decode()
+        )
+    except HTTPException as e:
+        verify = str(e.detail)[:200]
     if client_redirect:
         # Silent handback: the user never sees the key — the app receives it.
-        return RedirectResponse(
-            f"{client_redirect}#brainbridge_key={quote(key, safe='')}"
-            f"&email={quote(email, safe='')}",
-            status_code=302,
-        )
+        qs = f"brainbridge_key={quote(key, safe='')}&email={quote(email, safe='')}"
+        if verify:
+            qs += f"&oauth_warning={quote(verify, safe='')}"
+        return RedirectResponse(f"{client_redirect}#{qs}", status_code=302)
     reused_note = ("<small>(This is <b>the same key</b> as before — every sign-in "
                    "with this Google account reuses it.)</small><br>") if reused else ""
     page = _html_msg(
@@ -977,7 +985,12 @@ def oauth2callback(code: str | None = None, error: str | None = None,
         f"{reused_note}"
         f"Your API key:<br><code style='font-size:14px;word-break:break-all'>{key}</code><br><br>"
         f"Send it as <code>Authorization: Bearer {key[:8]}…</code>.<br>"
-        f"<small>Revoke anytime at myaccount.google.com/permissions. "
+        + ((f"<br><b style='color:#fbbf24'>⚠ Refresh check failed:</b> "
+            f"<small style='color:#fbbf24'>{verify}</small><br>"
+            f"<small style='color:#fbbf24'>Revoke BrainBridge at "
+            f"myaccount.google.com/permissions and sign in again.</small>"
+            if verify else ""))
+        + f"<small>Revoke anytime at myaccount.google.com/permissions. "
         f"This key works for /memory/notes, /memory/note, /memory/notes/context.</small>",
     )
     # Popup flow: whisper the key to the opener window (if any) too.
@@ -1156,6 +1169,44 @@ def system_check():
         out["user_key_prefixes"] = sorted({u.get("key", "")[:6] for u in users})[:50]
     except Exception as e:  # noqa: BLE001
         out["users_list_error"] = str(e)[:120]
+    return out
+
+
+@app.get("/system/oauthdebug")
+def system_oauthdebug(authorization: str | None = Header(default=None)):
+    """Owner: diagnose 'refresh token invalid_grant'. Shows the stored
+    refresh token fingerprint, tries a live refresh, and reports exactly
+    what Google says. No secrets leaked (token -> last 8 chars only)."""
+    ctx = _authorize(authorization)
+    if ctx.get("user") is not None:
+        raise HTTPException(403, "Owner only")
+    store = get_store()
+    users = [u for u in store.list_users() if u.get("provider") == "tasks"]
+    out = {"users": []}
+    for u in users:
+        rec: dict = {
+            "email": u.get("email"),
+            "key_prefix": (u.get("key") or "")[:6],
+            "created": u.get("created"),
+            "updated": u.get("updated"),
+            "has_google_sub": bool(u.get("google_sub")),
+        }
+        try:
+            rt = decrypt_state(u["refresh_token"]).decode()
+            rec["rt_len"] = len(rt)
+            rec["rt_mid"] = rt[:6] + "…" + rt[-8:] if len(rt) > 14 else "?"
+        except Exception as e:  # noqa: BLE001
+            rec["rt_error"] = str(e)[:120]
+            out["users"].append(rec)
+            continue
+        try:
+            at = oauth_flow.refresh_access_token(rt)
+            rec["refresh_ok"] = True
+            rec["access_token_len"] = len(at)
+        except HTTPException as e:
+            rec["refresh_ok"] = False
+            rec["refresh_err"] = str(e.detail)[:300]
+        out["users"].append(rec)
     return out
 
 
