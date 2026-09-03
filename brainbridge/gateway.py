@@ -1072,19 +1072,31 @@ def oauth_refresh(authorization: str | None = Header(default=None)):
 def notes_list(limit: int = 300, keyword: str | None = None,
                authorization: str | None = Header(default=None)):
     """BrainBridge Notes: list your memory entries (Google Tasks)."""
-    ctx = _authorize(authorization)
-    token = _tasks_token(ctx)
-    notes = _gcalls(tasks_store.search_notes, token, keyword, limit=limit) if keyword else _gcalls(tasks_store.list_notes, token, limit=limit)
-    return {"brain": "google-tasks", "notes": notes, "count": len(notes)}
+    try:
+        ctx = _authorize(authorization)
+        token = _tasks_token(ctx)
+        notes = _gcalls(tasks_store.search_notes, token, keyword, limit=limit) if keyword else _gcalls(tasks_store.list_notes, token, limit=limit)
+        return {"brain": "google-tasks", "notes": notes, "count": len(notes)}
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        import traceback
+        raise HTTPException(500, f"notes_list crash: {e}\n{traceback.format_exc()[-1500:]}") from e
 
 
 @app.post("/memory/note")
 def note_save(req: SaveIn, authorization: str | None = Header(default=None)):
     """BrainBridge Notes: save a memory entry (title + content)."""
-    ctx = _authorize(authorization)
-    token = _tasks_token(ctx)
-    note = _gcalls(tasks_store.create_note, token, req.title, req.content)
-    return {"brain": "google-tasks", "note": note}
+    try:
+        ctx = _authorize(authorization)
+        token = _tasks_token(ctx)
+        note = _gcalls(tasks_store.create_note, token, req.title, req.content)
+        return {"brain": "google-tasks", "note": note}
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        import traceback
+        raise HTTPException(500, f"note_save crash: {e}\n{traceback.format_exc()[-1500:]}") from e
 
 
 @app.get("/memory/note/{note_id}")
