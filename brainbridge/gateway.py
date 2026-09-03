@@ -897,6 +897,20 @@ def _tasks_token(ctx: dict) -> str:
     return _refresh_and_rotate(u)
 
 
+def _gcalls(fn, *a, **kw):
+    """Run a tasks_store call and convert Google's errors into readable 502s."""
+    try:
+        return fn(*a, **kw)
+    except httpx.HTTPStatusError as e:
+        body = (e.response.text or "")[:250]
+        raise HTTPException(
+            502,
+            f"Google Tasks API {e.response.status_code}: {body}",
+        ) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"Google Tasks error: {str(e)[:250]}") from e
+
+
 def _sign_secret() -> bytes:
     s = os.environ.get("BRAINBRIDGE_SECRET", "").strip().encode()
     return s or b"bb-dev-fallback-secret"
@@ -1060,7 +1074,7 @@ def notes_list(limit: int = 300, keyword: str | None = None,
     """BrainBridge Notes: list your memory entries (Google Tasks)."""
     ctx = _authorize(authorization)
     token = _tasks_token(ctx)
-    notes = tasks_store.search_notes(token, keyword, limit=limit) if keyword else tasks_store.list_notes(token, limit=limit)
+    notes = _gcalls(tasks_store.search_notes, token, keyword, limit=limit) if keyword else _gcalls(tasks_store.list_notes, token, limit=limit)
     return {"brain": "google-tasks", "notes": notes, "count": len(notes)}
 
 
@@ -1069,7 +1083,7 @@ def note_save(req: SaveIn, authorization: str | None = Header(default=None)):
     """BrainBridge Notes: save a memory entry (title + content)."""
     ctx = _authorize(authorization)
     token = _tasks_token(ctx)
-    note = tasks_store.create_note(token, req.title, req.content)
+    note = _gcalls(tasks_store.create_note, token, req.title, req.content)
     return {"brain": "google-tasks", "note": note}
 
 
@@ -1077,7 +1091,7 @@ def note_save(req: SaveIn, authorization: str | None = Header(default=None)):
 def note_get(note_id: str, authorization: str | None = Header(default=None)):
     ctx = _authorize(authorization)
     token = _tasks_token(ctx)
-    note = tasks_store.get_note(token, note_id)
+    note = _gcalls(tasks_store.get_note, token, note_id)
     if note is None:
         raise HTTPException(404, "no such note")
     return {"brain": "google-tasks", "note": note}
@@ -1087,7 +1101,7 @@ def note_get(note_id: str, authorization: str | None = Header(default=None)):
 def note_delete(note_id: str, authorization: str | None = Header(default=None)):
     ctx = _authorize(authorization)
     token = _tasks_token(ctx)
-    ok = tasks_store.delete_note(token, note_id)
+    ok = _gcalls(tasks_store.delete_note, token, note_id)
     return {"ok": ok, "deleted": note_id if ok else None}
 
 
@@ -1096,7 +1110,7 @@ def notes_context(limit: int = 8, authorization: str | None = Header(default=Non
     """BrainBridge Notes: 'what is already known' — ready for an AI prompt."""
     ctx = _authorize(authorization)
     token = _tasks_token(ctx)
-    notes = tasks_store.list_notes(token, limit=200)
+    notes = _gcalls(tasks_store.list_notes, token, limit=200)
     context = tasks_store.render_context(notes, limit=limit)
     return {"brain": "google-tasks", "context": context,
             "note_count": len(notes),
@@ -1112,7 +1126,7 @@ def note_ask(req: AskIn, authorization: str | None = Header(default=None)):
     is returned and the calling AI composes the answer."""
     ctx = _authorize(authorization)
     token = _tasks_token(ctx)
-    notes = tasks_store.list_notes(token, limit=200)
+    notes = _gcalls(tasks_store.list_notes, token, limit=200)
     context = tasks_store.render_context(notes, limit=10)
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if gemini_key:
