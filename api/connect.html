@@ -141,10 +141,14 @@ function pick(t){
   if(t==='c') refreshSys();
 }
 let SYSTEM = null;   // last /system/info payload
+// If the page was opened as .../connect?redirect=<app-callback>, the API key
+// is handed back to that app directly (silent handback, user never sees it).
+const REDIRECT = new URLSearchParams(location.search).get('redirect') || '';
 document.addEventListener('DOMContentLoaded', () => {
   const base = API.replace(/\/$/, '');
-  document.getElementById('btnHero').href = base + '/auth/oauth/start';
-  document.getElementById('btnC').href = base + '/auth/oauth/start';
+  const q = REDIRECT ? '?redirect=' + encodeURIComponent(REDIRECT) : '';
+  document.getElementById('btnHero').href = base + '/auth/oauth/start' + q;
+  document.getElementById('btnC').href = base + '/auth/oauth/start' + q;
 });
 // Opens the REAL Google consent screen ("BrainBridge wants access to your
 // Google Tasks") in a NEW TAB. Blocked only if OAuth is not configured.

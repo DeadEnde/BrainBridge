@@ -21,14 +21,18 @@ from __future__ import annotations
 
 import base64
 import gzip
+import hashlib
+import hmac
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -855,12 +859,51 @@ def _tasks_token(ctx: dict) -> str:
     return oauth_flow.refresh_access_token(rt)
 
 
+def _sign_secret() -> bytes:
+    s = os.environ.get("BRAINBRIDGE_SECRET", "").strip().encode()
+    return s or b"bb-dev-fallback-secret"
+
+
+def _pack_redirect(redirect: str | None) -> str | None:
+    """Embed a client callback URL inside the OAuth `state` (HMAC-signed),
+    so the consent flow can hand the API key back to the calling app."""
+    if not redirect:
+        return None
+    r = redirect.strip()[:500]
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://", r):
+        return None  # not a URL (blocks javascript:, data: only via scheme check)
+    if r.lower().startswith(("javascript:", "data:", "file:", "vbscript:")):
+        return None
+    blob = base64.urlsafe_b64encode(
+        json.dumps({"r": r, "n": secrets.token_urlsafe(8)}).encode()
+    ).decode()
+    sig = hmac.new(_sign_secret(), blob.encode(), hashlib.sha256).hexdigest()[:22]
+    return f"{blob}.{sig}"
+
+
+def _unpack_redirect(state: str | None) -> str | None:
+    """Reverse of _pack_redirect. Returns None on any tamper/parse issue."""
+    if not state or "." not in state:
+        return None
+    blob, sig = state.rsplit(".", 1)
+    expect = hmac.new(_sign_secret(), blob.encode(), hashlib.sha256).hexdigest()[:22]
+    if not hmac.compare_digest(expect, sig):
+        return None
+    try:
+        return json.loads(base64.urlsafe_b64decode(blob.encode()).decode())["r"]
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @app.api_route("/auth/oauth/start", methods=["GET", "POST"])
-def oauth_start(request: Request, label: str | None = None):
-    """Public: returns (POST) or redirects to (GET) the Google consent URL
-    ('BrainBridge wants access to your Google Tasks'). GET behaviour lets a
-    plain link / button open the consent screen in a new browser tab."""
-    state = secrets.token_urlsafe(8)
+def oauth_start(request: Request, redirect: str | None = None, label: str | None = None):
+    """Public Google consent URL ('BrainBridge wants access to your Google
+    Tasks'). GET -> 302 to Google (button/link in a new tab); POST -> JSON.
+    Optional `redirect`: after consent the browser is sent straight to
+    <redirect>#brainbridge_key=... so the key reaches the calling app
+    without the user ever reading it (silent handback)."""
+    packed = _pack_redirect(redirect)
+    state = packed or secrets.token_urlsafe(8)
     url = oauth_flow.auth_url(state)
     if request.method == "GET":
         return RedirectResponse(url, status_code=302)
@@ -907,16 +950,29 @@ def oauth2callback(code: str | None = None, error: str | None = None,
             "updated": int(datetime.now(timezone.utc).timestamp()),
             "note": "oauth-tasks",
         })
-    return HTMLResponse(
-        _html_msg(
-            "✅ Connected!",
-            f"<b>{email or 'Your account'}</b> is linked to BrainBridge.<br>"
-            f"Your API key:<br><code style='font-size:14px;word-break:break-all'>{key}</code><br><br>"
-            f"Send it as <code>Authorization: Bearer {key[:8]}…</code>.<br>"
-            f"<small>Revoke anytime at myaccount.google.com/permissions. "
-            f"This key works for /memory/notes, /memory/note, /memory/notes/context.</small>",
+    client_redirect = _unpack_redirect(state)
+    if client_redirect:
+        # Silent handback: the user never sees the key — the app receives it.
+        return RedirectResponse(
+            f"{client_redirect}#brainbridge_key={quote(key, safe='')}"
+            f"&email={quote(email, safe='')}",
+            status_code=302,
         )
+    page = _html_msg(
+        "✅ Connected!",
+        f"<b>{email or 'Your account'}</b> is linked to BrainBridge.<br>"
+        f"Your API key:<br><code style='font-size:14px;word-break:break-all'>{key}</code><br><br>"
+        f"Send it as <code>Authorization: Bearer {key[:8]}…</code>.<br>"
+        f"<small>Revoke anytime at myaccount.google.com/permissions. "
+        f"This key works for /memory/notes, /memory/note, /memory/notes/context.</small>",
     )
+    # Popup flow: whisper the key to the opener window (if any) too.
+    page = page.replace(
+        "</body>",
+        f"<script>try{{if(window.opener)window.opener.postMessage("
+        f"{{type:'brainbridge_key',key:'{key}',email:'{quote(email, safe='')}'}},'*')}}catch(e){{}}</script></body>",
+    )
+    return HTMLResponse(page)
 
 
 def _html_msg(title: str, body: str) -> str:
