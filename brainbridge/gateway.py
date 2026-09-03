@@ -23,6 +23,7 @@ import base64
 import gzip
 import hashlib
 import hmac
+import httpx
 import json
 import os
 import re
@@ -1266,6 +1267,15 @@ def system_oauthdebug(authorization: str | None = Header(default=None)):
             rec["refresh_ok"] = True
             rec["access_token_len"] = len(at)
             rec["has_prev"] = bool(u.get("refresh_token_prev"))
+            # --- temporary diagnostics: probe the Tasks API directly ---
+            try:
+                rl = httpx.get("https://tasks.googleapis.com/tasks/v1/users/@me/lists",
+                               headers={"Authorization": f"Bearer {at}"}, timeout=30)
+                rec["probe_lists"] = {"status": rl.status_code,
+                                      "items": [{"title": i.get("title"), "id": i.get("id")}
+                                                for i in rl.json().get("items", [])][:10]}
+            except Exception as e:  # noqa: BLE001
+                rec["probe_lists"] = {"err": str(e)[:200]}
         except HTTPException as e:
             rec["refresh_ok"] = False
             rec["refresh_err"] = str(e.detail)[:300]
