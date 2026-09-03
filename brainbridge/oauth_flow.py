@@ -99,9 +99,18 @@ def refresh_access_token(refresh_token: str) -> str:
 
 
 def user_email(access_token: str) -> str:
-    r = httpx.get("https://www.googleapis.com/oauth2/v2/userinfo",
-                  params={"alt": "json"},
+    return user_profile(access_token).get("email", "")
+
+
+def user_profile(access_token: str) -> dict:
+    """Email + stable account id (sub) for the authorized user."""
+    r = httpx.get("https://openidconnect.googleapis.com/v1/userinfo",
                   headers={"Authorization": f"Bearer {access_token}"}, timeout=30)
     if r.status_code != 200:
+        r = httpx.get("https://www.googleapis.com/oauth2/v2/userinfo",
+                      params={"alt": "json"},
+                      headers={"Authorization": f"Bearer {access_token}"}, timeout=30)
+    if r.status_code != 200:
         raise HTTPException(401, f"userinfo failed: {r.text[:200]}")
-    return r.json().get("email", "")
+    j = r.json()
+    return {"email": j.get("email", ""), "sub": j.get("sub", "")}

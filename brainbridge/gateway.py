@@ -924,32 +924,43 @@ def oauth2callback(code: str | None = None, error: str | None = None,
     except Exception as e:  # noqa: BLE001
         return HTMLResponse(_html_msg("❌ Could not exchange the code", str(e)[:300]), status_code=400)
     try:
-        email = oauth_flow.user_email(tokens["access_token"])
+        profile = oauth_flow.user_profile(tokens["access_token"])
     except Exception:  # noqa: BLE001
-        email = ""
+        profile = {}
+    email = profile.get("email", "")
+    gsub = profile.get("sub", "")
     # one user per Google account (update refresh token instead of duplicating)
     store = get_store()
     existing = None
     for u in store.list_users():
-        if u.get("provider") == "tasks" and u.get("email") == email:
+        if u.get("provider") != "tasks":
+            continue
+        if (gsub and u.get("google_sub") == gsub) or (email and u.get("email") == email):
             existing = u
             break
     if existing:
         key = existing["key"]
         existing["refresh_token"] = encrypt_state(tokens["refresh_token"].encode())
+        if email:
+            existing["email"] = email
+        if gsub:
+            existing["google_sub"] = gsub
         existing["updated"] = int(datetime.now(timezone.utc).timestamp())
         store.put_user(existing)
         label = existing.get("label") or email or "user"
+        reused = True
     else:
         key = secrets.token_urlsafe(24)
         label = email or "user"
         store.put_user({
-            "key": key, "label": label, "email": email, "provider": "tasks",
+            "key": key, "label": label, "email": email, "google_sub": gsub,
+            "provider": "tasks",
             "refresh_token": encrypt_state(tokens["refresh_token"].encode()),
             "created": int(datetime.now(timezone.utc).timestamp()),
             "updated": int(datetime.now(timezone.utc).timestamp()),
             "note": "oauth-tasks",
         })
+        reused = False
     client_redirect = _unpack_redirect(state)
     if client_redirect:
         # Silent handback: the user never sees the key — the app receives it.
@@ -958,9 +969,12 @@ def oauth2callback(code: str | None = None, error: str | None = None,
             f"&email={quote(email, safe='')}",
             status_code=302,
         )
+    reused_note = ("<small>(This is <b>the same key</b> as before — every sign-in "
+                   "with this Google account reuses it.)</small><br>") if reused else ""
     page = _html_msg(
         "✅ Connected!",
         f"<b>{email or 'Your account'}</b> is linked to BrainBridge.<br>"
+        f"{reused_note}"
         f"Your API key:<br><code style='font-size:14px;word-break:break-all'>{key}</code><br><br>"
         f"Send it as <code>Authorization: Bearer {key[:8]}…</code>.<br>"
         f"<small>Revoke anytime at myaccount.google.com/permissions. "
@@ -1143,6 +1157,22 @@ def system_check():
     except Exception as e:  # noqa: BLE001
         out["users_list_error"] = str(e)[:120]
     return out
+
+
+@app.get("/system/users")
+def system_users(authorization: str | None = Header(default=None)):
+    """Owner only: full user list (keys visible) so the owner can recover a
+    user's key without re-doing OAuth. Refresh tokens are never returned."""
+    ctx = _authorize(authorization)
+    if ctx.get("user") is not None:
+        raise HTTPException(403, "Owner only")
+    store = get_store()
+    out = []
+    for u in store.list_users():
+        u = dict(u)
+        u.pop("refresh_token", None)
+        out.append(u)
+    return {"store": store.name, "users": out}
 
 
 @app.get("/system/status")
