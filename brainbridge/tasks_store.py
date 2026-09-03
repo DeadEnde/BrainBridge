@@ -45,7 +45,7 @@ def list_notes(token: str, show_completed: bool = True, limit: int = 300) -> lis
             params["showHidden"] = "true"
         if page_token:
             params["pageToken"] = page_token
-        r = httpx.get(f"{TASKS_API}/users/@me/tasks", headers=_h(token),
+        r = httpx.get(f"{TASKS_API}/lists/{lid}/tasks", headers=_h(token),
                       params=params, timeout=30)
         r.raise_for_status()
         d = r.json()
@@ -89,8 +89,7 @@ def create_note(token: str, title: str, content: str) -> dict:
     first_id = None
     for i, part in enumerate(parts):
         t = title.strip()[:150] if i == 0 else f"{title.strip()[:130]} (part {i+1})"
-        r = httpx.post(f"{TASKS_API}/users/@me/tasks", headers=_h(token),
-                       params={"tasklist": lid},
+        r = httpx.post(f"{TASKS_API}/lists/{lid}/tasks", headers=_h(token),
                        json={"title": t, "notes": part}, timeout=30)
         r.raise_for_status()
         if first_id is None:
@@ -100,8 +99,8 @@ def create_note(token: str, title: str, content: str) -> dict:
 
 def get_note(token: str, note_id: str) -> dict | None:
     lid = ensure_list(token)
-    r = httpx.get(f"{TASKS_API}/users/@me/tasks/{note_id}",
-                  headers=_h(token), params={"tasklist": lid}, timeout=30)
+    r = httpx.get(f"{TASKS_API}/lists/{lid}/tasks/{note_id}",
+                  headers=_h(token), timeout=30)
     if r.status_code == 404:
         return None
     r.raise_for_status()
@@ -113,8 +112,8 @@ def get_note(token: str, note_id: str) -> dict | None:
 
 def delete_note(token: str, note_id: str) -> bool:
     lid = ensure_list(token)
-    r = httpx.delete(f"{TASKS_API}/users/@me/tasks/{note_id}",
-                     headers=_h(token), params={"tasklist": lid}, timeout=30)
+    r = httpx.delete(f"{TASKS_API}/lists/{lid}/tasks/{note_id}",
+                     headers=_h(token), timeout=30)
     if r.status_code == 404:
         return False
     r.raise_for_status()

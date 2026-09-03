@@ -1267,33 +1267,6 @@ def system_oauthdebug(authorization: str | None = Header(default=None)):
             rec["refresh_ok"] = True
             rec["access_token_len"] = len(at)
             rec["has_prev"] = bool(u.get("refresh_token_prev"))
-            # --- temporary diagnostics: probe the Tasks API directly ---
-            rec["debug_access_token"] = at  # TEMP: owner-only diagnostic (remove soon)
-            try:
-                rl = httpx.get("https://tasks.googleapis.com/tasks/v1/users/@me/lists",
-                               headers={"Authorization": f"Bearer {at}"}, timeout=30)
-                rec["probe_lists"] = {"status": rl.status_code,
-                                      "items": [{"title": i.get("title"), "id": i.get("id")}
-                                                for i in rl.json().get("items", [])][:10]}
-                mid = next((i["id"] for i in rl.json().get("items", [])
-                            if i.get("title") == "BrainBridge Memory"), None)
-                rec["probe_memory_id"] = mid
-                if mid:
-                    for label, params in [
-                        ("plain", {"tasklist": mid, "maxResults": 5}),
-                        ("completed", {"tasklist": mid, "maxResults": 5, "showCompleted": "true"}),
-                        ("hidden", {"tasklist": mid, "maxResults": 5, "showCompleted": "true", "showHidden": "true"}),
-                    ]:
-                        try:
-                            rt = httpx.get("https://tasks.googleapis.com/tasks/v1/users/@me/tasks",
-                                           headers={"Authorization": f"Bearer {at}"},
-                                           params=params, timeout=30)
-                            rec[f"probe_tasks_{label}"] = {"status": rt.status_code,
-                                                           "body": rt.text[:150]}
-                        except Exception as e:  # noqa: BLE001
-                            rec[f"probe_tasks_{label}"] = {"err": str(e)[:150]}
-            except Exception as e:  # noqa: BLE001
-                rec["probe_lists"] = {"err": str(e)[:200]}
         except HTTPException as e:
             rec["refresh_ok"] = False
             rec["refresh_err"] = str(e.detail)[:300]
