@@ -73,9 +73,14 @@ def privacy_page():
     return HTMLResponse("<h1>BrainBridge Privacy Policy</h1>")
 
 
-from brainbridge.mcp_server import http_app as mcp_http_app  # noqa: E402
+# MCP endpoint (stateless JSON-RPC, FastAPI-only — serverless-safe):
+# AI clients connect with URL + Authorization: Bearer <key>, no repo install.
+from brainbridge.mcp_server import app as mcp_app  # noqa: E402
+from brainbridge.mcp_server import mcp_endpoint as _mcp_ep  # noqa: E402
 
-# MCP endpoint: AI clients connect with URL + Authorization: Bearer <key>.
-app.mount("/mcp", mcp_http_app())
+# exact "/mcp" (no trailing slash) -> direct route (no 307); "/mcp/*" -> mount
+app.add_api_route("/mcp", _mcp_ep, methods=["GET", "POST", "DELETE"],
+                  include_in_schema=False)
+app.mount("/mcp/", mcp_app)
 
 app.mount("/api", gateway_app)
