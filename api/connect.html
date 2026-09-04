@@ -106,7 +106,10 @@
       <b>1.</b> Klek <b>Sign in with Google</b> — kay-7ell l-screen l-officiel dyal Google:<br>
       &nbsp;&nbsp;<b>"BrainBridge wants access to your Google Tasks"</b>&nbsp;→&nbsp;klek <b>Continue</b>.<br>
       <b>2.</b> Google kay-rje3 lik hna + kay-3tik <b>API key dyalk</b> (f l-page).<br>
-      <b>3.</b> Kol mémoire = note f <b>Google Tasks</b> (dossier "BrainBridge Memory") — t9der t-revokeh ay waqt mn <code>myaccount.google.com/permissions</code>.
+      <b>3.</b> Kol mémoire = note f <b>Google Tasks</b> (dossier "BrainBridge Memory") — t9der t-revokeh ay waqt mn <code>myaccount.google.com/permissions</code>.<br>
+      <b>4.</b> <b>AI y-connecti direct</b> (bla repo, bla install) b MCP:<br>
+      &nbsp;&nbsp;<code style="display:block;margin:6px 0;padding:10px;background:#0d1020;border-radius:10px;font-size:.74rem">{"mcpServers":{"brainbridge":{"url":"{{API_BASE}}/mcp","headers":{"Authorization":"Bearer &lt;VOTRE_KEY&gt;"}}}}</code>
+      &nbsp;&nbsp;— REST: <code>{{API_BASE}}/memory/notes</code> b <code>Authorization: Bearer &lt;key&gt;</code>.
     </div>
     <a id="btnC" class="google-btn" href="{{API_BASE}}/auth/oauth/start" target="_blank" rel="noopener" onclick="return oauthGate(event)">🔐 Sign in with Google<span class="nw">↗ new tab</span></a>
     <div class="hint" id="oauthHint"></div>
