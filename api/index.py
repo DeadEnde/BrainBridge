@@ -73,4 +73,9 @@ def privacy_page():
     return HTMLResponse("<h1>BrainBridge Privacy Policy</h1>")
 
 
+from brainbridge.mcp_server import http_app as mcp_http_app  # noqa: E402
+
+# MCP endpoint: AI clients connect with URL + Authorization: Bearer <key>.
+app.mount("/mcp", mcp_http_app())
+
 app.mount("/api", gateway_app)

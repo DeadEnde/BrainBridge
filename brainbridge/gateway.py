@@ -43,6 +43,7 @@ from .users_store import get_store, store_name
 from .secret import decrypt_state, encrypt_state, secrets_enabled
 from . import oauth_flow
 from . import tasks_store
+from .tasks_tokens import refresh_and_rotate as _refresh_and_rotate
 
 # ---------------------------------------------------------------------------
 # Brain registry — keep in sync with server.py (BRAIN_REGISTRY)
@@ -857,38 +858,7 @@ def refresh_all(limit: int = 20, offset: int = 0,
 # ---------------------------------------------------------------------------
 # BrainBridge Notes — official Google OAuth (Tasks) flow
 # ---------------------------------------------------------------------------
-def _refresh_and_rotate(u: dict) -> str:
-    """Refresh Google's access token for a tasks user and PERSIST the rotated
-    refresh token Google returns (Google invalidates the previous one right
-    away for unverified apps). Keeps the previous token as fallback."""
-    cands: list[tuple[str, str]] = []
-    try:
-        cands.append(("current", decrypt_state(u["refresh_token"]).decode()))
-    except Exception:  # noqa: BLE001
-        pass
-    if u.get("refresh_token_prev"):
-        try:
-            cands.append(("prev", decrypt_state(u["refresh_token_prev"]).decode()))
-        except Exception:  # noqa: BLE001
-            pass
-    last: Exception | None = None
-    for slot, tok in cands:
-        try:
-            at, new_rt = oauth_flow.refresh_access_token(tok)
-        except HTTPException as e:
-            last = e
-            continue
-        if new_rt:
-            if slot == "current":
-                u["refresh_token_prev"] = u["refresh_token"]
-            u["refresh_token"] = encrypt_state(new_rt.encode())
-            get_store().put_user(u)
-        return at
-    raise HTTPException(
-        401, f"Refresh token rejected (last error: {last})" if last
-        else "No refresh token stored for this user"
-    )
-
+# (token rotation now lives in .tasks_tokens — shared with the MCP server)
 
 def _tasks_token(ctx: dict) -> str:
     """For a tasks-provider user: (re)issue an access token from the refresh token."""

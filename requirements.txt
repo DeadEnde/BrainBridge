@@ -7,3 +7,4 @@ notebooklm-py[headless,browser]>=0.6
 fastmcp>=2.0
 vercel-blob>=0.4
 cryptography>=42
+mcp>=1.12,<2
